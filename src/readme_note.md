@@ -1,9 +1,43 @@
 # {{TEMPLATE_NAME}}: read this first
 
-## Add a LoRA from CivitAI
+## Download any CivitAI model straight into your pod
 
-[PLACEHOLDER. Aviv's CivitAI download guide goes here. Do not ship this
-note until this section is filled in.]
+My templates can pull LoRAs and checkpoints from CivitAI for you at boot.
+No downloading to your machine, no uploading to the pod.
+
+Get your CivitAI token. You only do this once:
+
+1. Click your profile picture, top right on CivitAI.
+2. Click Account Settings, the cog icon.
+3. Scroll all the way down to API Keys.
+4. Click Add API Key, give it a name, and copy it somewhere safe.
+
+Then every time you deploy:
+
+1. Click Edit Template before you deploy, not after.
+2. Expand the environment variables tab.
+3. Paste your token into the civitai_token variable.
+4. Add the model IDs you want to download: LoRAs in
+   LORAS_IDS_TO_DOWNLOAD, checkpoints in CHECKPOINT_IDS_TO_DOWNLOAD.
+
+The model ID is the second part of the AIR on the model page. For more
+than one, separate them with commas:
+
+```
+1081768,351306
+```
+
+Save and deploy. They download on their own. Your pod is already
+running, so this is how you set it up for your next deploy. You can also
+edit the same variables on this pod and restart it.
+
+If the template you are deploying has no variable for model IDs, it
+means I have not built it into that one yet. I have a lot of templates.
+Tell me in the help-and-support channel on Discord and I will prioritise
+it.
+
+Full write-up:
+https://civitai.red/articles/12333/how-to-use-hearmemans-civitai-downloader-when-deploying-a-runpod-template
 
 ## Add a LoRA from Hugging Face
 
@@ -54,5 +88,5 @@ paste it.
 
 ## Links
 
-- More models and workflows: https://civitai.com/user/HearmemanAI
+- More models and workflows: https://civitai.red/user/HearmemanAI
 - Help and support: https://discord.gg/ZVWVhT43GW

@@ -327,7 +327,10 @@ def test_note_written_and_is_a_markdownnote_workflow():
         ok("ComfyUI is ready" in md and "3/3 downloaded" in md, md)
         ok(out.strip().splitlines()[0] in md,
            "report body not injected verbatim")
-        ok("Troubleshooting" in md, md)
+        # The note's own content: the LoRA how-to with the real on-pod
+        # path, and the missing-model steps (env var first, never Jupyter).
+        ok("/workspace/ComfyUI/models/loras" in md, md)
+        ok("A model is missing" in md, md)
         ok("discord.gg" in md, md)
         # Nothing switched off on this boot.
         ok("Nothing is switched off on this pod." in md, md)

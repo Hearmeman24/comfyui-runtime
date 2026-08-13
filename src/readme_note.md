@@ -80,6 +80,11 @@ paste it.
 {{DEPLOYMENT_REPORT}}
 ```
 
+About the SageAttn line: SageAttention makes generation faster. It is on
+automatically when your GPU supports it. If the line says DISABLED, your
+GPU has no support for it, so it switched itself off. Everything still
+works, generation is a bit slower, and there is nothing for you to fix.
+
 ## Switched off on this pod
 
 {{DISABLED_FEATURES}}

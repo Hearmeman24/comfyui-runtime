@@ -14,10 +14,10 @@
 # An unpinned install from this index resolves to this exact trio today, so
 # pinning changes nothing for a fresh build; it only stops future drift.
 #
-# DECISION NEEDED: confirm torch 2.11.0 for cu128. The alternative is
-# pinning to whatever the currently-live wan image happens to carry (unknowable
-# from the repo; it froze whatever was stable on its last build day). 2.11.0 is
-# recommended: it matches minimax's validated cu130 pin version-for-version.
+# Confirmed 2026-08-13: torch 2.11.0 for cu128. The alternative was pinning to
+# whatever the currently-live wan image happens to carry (unknowable from the
+# repo; it froze whatever was stable on its last build day). 2.11.0 matches
+# minimax's validated cu130 pin version-for-version.
 --index-url https://download.pytorch.org/whl/cu128
 torch==2.11.0
 torchvision==0.26.0

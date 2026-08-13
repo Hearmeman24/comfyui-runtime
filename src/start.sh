@@ -188,42 +188,6 @@ link_volume_dirs() {
 }
 link_volume_dirs
 
-# Generate extra_model_paths.yaml from the live $PERSIST_ROOT so paths always
-# match the actual network volume. The yaml is generated from the SAME list
-# that is mkdir'd: every declared path must exist before launch or ComfyUI
-# dies in prestartup (CLAUDE.md section 9). Base list is wan's, frozen
-# (CONTRACTS.md section 5); template.json extra_model_paths entries are added.
-MODEL_PATH_CATEGORIES=(checkpoints clip clip_vision controlnet diffusion_models
-    embeddings loras style_models text_encoders unet upscale_models
-    latent_upscale_models detection vae)
-while IFS= read -r extra_cat; do
-    [ -z "$extra_cat" ] && continue
-    already=""
-    for cat in "${MODEL_PATH_CATEGORIES[@]}"; do
-        [ "$cat" = "$extra_cat" ] && already=1 && break
-    done
-    [ -z "$already" ] && MODEL_PATH_CATEGORIES+=("$extra_cat")
-done < <(template_json_get extra_model_paths)
-
-for cat in "${MODEL_PATH_CATEGORIES[@]}"; do
-    mkdir -p "$PERSIST_ROOT/models/$cat"
-done
-
-EXTRA_PATHS_FLAG=""
-if [ "$NETWORK_VOLUME" != "/" ]; then
-    {
-        echo "network_volume:"
-        echo "    base_path: $PERSIST_ROOT"
-        for cat in "${MODEL_PATH_CATEGORIES[@]}"; do
-            echo "    $cat: models/$cat"
-        done
-        echo "    custom_nodes: custom_nodes"
-    } > "$COMFYUI_DIR/extra_model_paths.yaml"
-    EXTRA_PATHS_FLAG="--extra-model-paths-config $COMFYUI_DIR/extra_model_paths.yaml"
-else
-    rm -f "$COMFYUI_DIR/extra_model_paths.yaml"
-fi
-
 # ---------------------------------------------------------------------------
 # COMFYUI_VERSION (plan section 5b). approved (default) ACTIVELY RESTORES to
 # the SHA baked at /comfyui-approved-ref: the writable layer persists across a
@@ -291,6 +255,87 @@ fi
 report_kv comfy_sha "$(git -C "$COMFYUI_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
 report_kv comfy_version "$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$COMFYUI_DIR/comfyui_version.py" 2>/dev/null)"
 report_kv comfy_mode "$COMFYUI_VERSION"
+
+# --- derived model paths: begin --------------------------------------------
+# extra_model_paths.yaml, derived from the pinned ComfyUI tree's OWN
+# folder_paths registry (src/model_paths.py) so the category list can never
+# drift from the ComfyUI this image actually runs (ltx2 migration spec D5;
+# supersedes the frozen wan list). Sits AFTER the COMFYUI_VERSION phase on
+# purpose: that phase can move /ComfyUI to a different ref, and the
+# categories must come from the tree that will actually run. The yaml is
+# written from the SAME list that is mkdir'd: every declared path must exist
+# before launch or ComfyUI dies in prestartup (CLAUDE.md section 9).
+# On any derivation failure model_paths.py prints a frozen v0.32.0 superset
+# instead (exit 3) and the boot report says so; the list is never empty and
+# boot never aborts (decision #19).
+MODEL_PATHS_TSV="$(python3 "$RUNTIME_DIR/src/model_paths.py" "$COMFYUI_DIR")"
+model_paths_rc=$?
+if [ "$model_paths_rc" -eq 3 ]; then
+    echo "⚠️  Model-path derivation from $COMFYUI_DIR failed; using the frozen fallback category list."
+    report_warn "Model-path derivation from the ComfyUI tree failed; frozen fallback category list used"
+elif [ "$model_paths_rc" -ne 0 ] || [ -z "$MODEL_PATHS_TSV" ]; then
+    echo "⚠️  model_paths.py did not run (exit $model_paths_rc); using the frozen fallback category list."
+    report_warn "model_paths.py did not run; frozen fallback category list used"
+    MODEL_PATHS_TSV="$(python3 "$RUNTIME_DIR/src/model_paths.py" --fallback)"
+fi
+
+# key -> "\n"-joined models/ relpaths. Multi-dir keys carry the legacy
+# alternate dirs under their REAL key (clip under text_encoders, unet under
+# diffusion_models, t2i_adapter under controlnet; t2i_adapter is not in
+# ComfyUI's map_legacy, so it must never become a key of its own).
+MODEL_PATH_KEYS=()
+MODEL_PATH_DIRS=()
+declare -A MODEL_PATH_KEY_DIRS=()
+while IFS=$'\t' read -r mp_key mp_rel; do
+    if [ -z "$mp_key" ] || [ -z "$mp_rel" ]; then continue; fi
+    MODEL_PATH_DIRS+=("$mp_rel")
+    if [ -z "${MODEL_PATH_KEY_DIRS[$mp_key]+x}" ]; then
+        MODEL_PATH_KEYS+=("$mp_key")
+        MODEL_PATH_KEY_DIRS[$mp_key]="models/$mp_rel"
+    else
+        MODEL_PATH_KEY_DIRS[$mp_key]="${MODEL_PATH_KEY_DIRS[$mp_key]}\\nmodels/$mp_rel"
+    fi
+done <<< "$MODEL_PATHS_TSV"
+
+# template.json extra_model_paths entries stay accepted and ADDITIVE: some
+# node packs read their own dirs and ignore folder_paths entirely. With the
+# derivation covering every native category, no template should need one.
+while IFS= read -r extra_cat; do
+    [ -z "$extra_cat" ] && continue
+    [ "$extra_cat" = "custom_nodes" ] && continue
+    mp_dup=""
+    for mp_rel in "${MODEL_PATH_DIRS[@]}"; do
+        [ "$mp_rel" = "$extra_cat" ] && mp_dup=1 && break
+    done
+    [ -n "${MODEL_PATH_KEY_DIRS[$extra_cat]+x}" ] && mp_dup=1
+    [ -n "$mp_dup" ] && continue
+    MODEL_PATH_DIRS+=("$extra_cat")
+    MODEL_PATH_KEYS+=("$extra_cat")
+    MODEL_PATH_KEY_DIRS[$extra_cat]="models/$extra_cat"
+done < <(template_json_get extra_model_paths)
+
+for mp_rel in "${MODEL_PATH_DIRS[@]}"; do
+    mkdir -p "$PERSIST_ROOT/models/$mp_rel"
+done
+
+EXTRA_PATHS_FLAG=""
+if [ "$NETWORK_VOLUME" != "/" ]; then
+    {
+        echo "network_volume:"
+        echo "    base_path: $PERSIST_ROOT"
+        # Values are double-quoted yaml scalars; a literal \n inside one
+        # becomes a real newline on load, and ComfyUI splits each value on
+        # newlines (utils/extra_config.py), registering every dir.
+        for mp_key in "${MODEL_PATH_KEYS[@]}"; do
+            printf '    %s: "%s"\n' "$mp_key" "${MODEL_PATH_KEY_DIRS[$mp_key]}"
+        done
+        echo "    custom_nodes: custom_nodes"
+    } > "$COMFYUI_DIR/extra_model_paths.yaml"
+    EXTRA_PATHS_FLAG="--extra-model-paths-config $COMFYUI_DIR/extra_model_paths.yaml"
+else
+    rm -f "$COMFYUI_DIR/extra_model_paths.yaml"
+fi
+# --- derived model paths: end ----------------------------------------------
 
 # ---------------------------------------------------------------------------
 # SageAttention: three synchronous steps (CONTRACTS.md sections 8/9, plan D9).

@@ -351,11 +351,90 @@ def test_watchdog(tmp):
     print("ok: stall watchdog abandons and exits 1")
 
 
+def test_watchdog_deadline(tmp):
+    """D14: DEADLINE_SECS must trip on total elapsed time even while byte
+    progress is continuous, i.e. when the stall condition can never fire."""
+    import json
+    reset_calls()
+    dm.LOCAL_STAGE = tmp / "hf_stage"
+    dm.STALL_SECS = 300     # stall must stay unreachable in this test
+    dm.DEADLINE_SECS = 0.3
+    status_path = tmp / "hf_status.json"
+    os.environ["HF_STATUS_FILE"] = str(status_path)
+    dest = tmp / "models" / "slow.safetensors"
+    man = tmp / "m.tsv"
+    man.write_text(f"{HF_URL}\t{dest}\t0.01\n")
+
+    block = threading.Event()
+    HF_BEHAVIOR["block"] = block
+    stop_feeding = threading.Event()
+
+    def feed_progress():
+        # Grow a file inside the worker's stage dir so global byte progress
+        # never pauses and the stall condition cannot be what fires. Give up
+        # after 3 s and release the blocked download, so a broken deadline
+        # branch fails the test instead of spinning until STALL_SECS.
+        stage_file = dm.LOCAL_STAGE / dest.name / "chunk"
+        n = 0
+        give_up_at = time.time() + 3
+        while not stop_feeding.is_set() and time.time() < give_up_at:
+            n += 4096
+            try:
+                stage_file.parent.mkdir(parents=True, exist_ok=True)
+                stage_file.write_bytes(b"\0" * n)
+            except OSError:
+                pass
+            time.sleep(0.02)
+        block.set()
+
+    feeder = threading.Thread(target=feed_progress, daemon=True)
+
+    def fake_exit(code):
+        raise WatchdogExit(code)
+
+    real_exit = os._exit
+    os._exit = fake_exit
+    argv_old = sys.argv
+    sys.argv = ["hf_download_manager.py", str(man)]
+    buf = io.StringIO()
+    feeder.start()
+    try:
+        with contextlib.redirect_stdout(buf):
+            try:
+                dm.main()
+                raise AssertionError(
+                    "deadline watchdog did not fire on a progressing download")
+            except WatchdogExit as e:
+                assert e.args[0] == 1, "watchdog must exit 1"
+    finally:
+        os._exit = real_exit
+        sys.argv = argv_old
+        stop_feeding.set()
+        block.set()
+        HF_BEHAVIOR["block"] = None
+        feeder.join()
+        dm.STALL_SECS = 300
+        dm.DEADLINE_SECS = 3600
+        del os.environ["HF_STATUS_FILE"]
+        time.sleep(0.3)  # let the released worker thread drain
+    out = buf.getvalue()
+    assert "abandoning" in out, f"watchdog must print its one-line abandon: {out}"
+    assert "deadline exceeded" in out, f"the trip must name the deadline: {out}"
+    assert "no progress for" not in out, \
+        f"the stall condition must not be what fired: {out}"
+    status = json.loads(status_path.read_text())
+    assert status[dest.name]["status"] == "failed", status
+    assert status[dest.name]["error"] == "deadline exceeded", \
+        f"failure reason must be the deadline, not the stall: {status}"
+    print("ok: deadline watchdog abandons a progressing-but-overdue phase and exits 1")
+
+
 def main() -> int:
     test_env_timeouts()
     for test in (test_parse_manifest, test_exit_codes, test_happy_path,
                  test_skip_and_refetch, test_floor_failure,
-                 test_stage_fallback, test_status_file, test_watchdog):
+                 test_stage_fallback, test_status_file, test_watchdog,
+                 test_watchdog_deadline):
         with tempfile.TemporaryDirectory() as tmp:
             test(Path(tmp))
     print("all download manager self-tests passed")

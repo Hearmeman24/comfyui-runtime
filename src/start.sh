@@ -472,12 +472,16 @@ if [ "$downloader_rc" -ne 0 ]; then
 fi
 
 # CivitAI ID downloads (minimax start.sh:227-263, with LORAS_DIR actually
-# defined, which neither donor does).
+# defined, which neither donor does). Canonical env names are CIVITAI_LORAS
+# and CIVITAI_CHECKPOINTS; civitai_env.sh keeps every legacy name working.
+# shellcheck disable=SC1091
+source "$RUNTIME_DIR/src/civitai_env.sh"
+resolve_civitai_env
 CHECKPOINTS_DIR="$PERSIST_ROOT/models/checkpoints"
 LORAS_DIR="$PERSIST_ROOT/models/loras"
 declare -A MODEL_CATEGORIES=(
-    ["$CHECKPOINTS_DIR"]="${CHECKPOINT_IDS_TO_DOWNLOAD:-replace_with_ids}"
-    ["$LORAS_DIR"]="${LORAS_IDS_TO_DOWNLOAD:-replace_with_ids}"
+    ["$CHECKPOINTS_DIR"]="${CIVITAI_CHECKPOINTS:-replace_with_ids}"
+    ["$LORAS_DIR"]="${CIVITAI_LORAS:-replace_with_ids}"
 )
 
 download_count=0
@@ -620,9 +624,9 @@ python3 "$RUNTIME_DIR/src/boot_report.py" \
     --manifest "$HF_QUEUE_FILE" \
     --provision-status "$PROVISION_STATUS_FILE" \
     --hf-status "$HF_STATUS_FILE" \
-    --note-skeleton "$RUNTIME_DIR/src/readme_note.md" \
+    --skeleton-dir "$RUNTIME_DIR/src" \
     --note-sections "$TEMPLATE_DIR/src/note_sections.md" \
-    --note-out "$WORKFLOW_DIR/!! Read This First/Read This First.json" \
+    --notes-root "$WORKFLOW_DIR" \
     || echo "⚠️  Deployment report renderer failed; the full boot log is at $NETWORK_VOLUME/comfyui.log"
 
 # Never let the container exit when ComfyUI dies.

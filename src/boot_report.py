@@ -7,9 +7,10 @@ only place they learn that something degraded. It replaces the old single
 "ComfyUI is Ready" line.
 
 The report body is generated ONCE and rendered twice from the same string:
-to stdout (the pod log), and into a single-MarkdownNote "workflow" written to
-the customer's workflow list, so the current boot's report is one click away
-inside ComfyUI itself. The note is re-rendered on every boot.
+to stdout (the pod log), and into the troubleshooting note, one of three
+single-MarkdownNote "workflows" (welcome, adding models, troubleshooting)
+written to the customer's workflow list, so the current boot's report is one
+click away inside ComfyUI itself. All three are re-rendered on every boot.
 
 Format: compact always, expand on failure. A clean boot is nine one-line
 rows. Only rows with something wrong expand, and every expansion names the
@@ -26,11 +27,14 @@ crash the boot):
                       PROVISION_STATUS_FILE is set
   --hf-status         JSON written by hf_download_manager.py when
                       HF_STATUS_FILE is set (failure reasons)
-  --note-skeleton     src/readme_note.md; with --note-out, renders the note
-  --note-sections     per-template markdown inserted into the skeleton
+  --skeleton-dir      directory holding the three note skeletons
+                      (src/note_welcome.md, src/note_civitai.md,
+                      src/note_troubleshooting.md)
+  --note-sections     per-template markdown inserted into the welcome note
                       (missing file is fine: no template ships one until its
                       migration commit)
-  --note-out          where to write the note workflow JSON
+  --notes-root        the customer's workflow directory; each note is written
+                      as <notes-root>/<folder>/<title>.json
 
 Customer-facing style: plain, short sentences, no emoji, no em or en dashes.
 """
@@ -48,6 +52,19 @@ DEFAULT_MIN_SIZE_MB = 10.0
 
 MODEL_CONSEQUENCE = "Workflows using this model will error."
 SAGE_CONSEQUENCE = "Workflows still run; generation is slower without it."
+
+# The three customer notes, in the order they must appear in the workflow
+# list. Notes live in folders because the workflow tree lists folders before
+# leaf workflows, so a bare file at the root would sort below every workflow
+# set folder. "!" sorts before digits and letters, floating the notes above
+# set folders like "Wan 2.2 I2V"; the digit fixes the order among the three
+# without leaning on how runs of "!" compare against each other.
+# (skeleton file, folder name, note title)
+NOTES = [
+    ("note_welcome.md", "!1 Welcome", "Welcome"),
+    ("note_civitai.md", "!2 Adding Models", "Adding Models"),
+    ("note_troubleshooting.md", "!3 Troubleshooting", "Troubleshooting"),
+]
 
 # Arch families upstream SageAttention has no dispatch arm for
 # (CONTRACTS.md section 8; fact C2: the sm100 compile work was reverted).
@@ -270,14 +287,14 @@ def render_note(skeleton_path, sections_path, kv, offs, report) -> str:
     return re.sub(r"\n{3,}", "\n\n", md)
 
 
-def note_workflow(md: str) -> dict:
+def note_workflow(md: str, title: str, seq: int) -> dict:
     """A one-node workflow in the UI format: a single MarkdownNote. The node
     type is registered by comfyui-frontend-package 1.48.7, the exact frontend
     ComfyUI v0.32.0 pins (requirements.txt at that tag); MarkdownNote is a
     virtual frontend node with its text in widgets_values[0], the same shape
     the tree's own blueprints ship. A note-only workflow has no API format."""
     return {
-        "id": "8e5a2f1c-0000-4000-8000-hearmemannote",
+        "id": f"8e5a2f1c-0000-4000-8000-hearmemannot{seq}",
         "revision": 0,
         "last_node_id": 1,
         "last_link_id": 0,
@@ -291,7 +308,7 @@ def note_workflow(md: str) -> dict:
             "mode": 0,
             "inputs": [],
             "outputs": [],
-            "title": "Read This First",
+            "title": title,
             "properties": {},
             "widgets_values": [md],
             "color": "#432",
@@ -312,9 +329,9 @@ def main(argv=None) -> int:
     ap.add_argument("--manifest")
     ap.add_argument("--provision-status")
     ap.add_argument("--hf-status")
-    ap.add_argument("--note-skeleton")
+    ap.add_argument("--skeleton-dir")
     ap.add_argument("--note-sections")
-    ap.add_argument("--note-out")
+    ap.add_argument("--notes-root")
     args = ap.parse_args(argv)
 
     kv, warnings, offs = read_state(args.state)
@@ -327,19 +344,20 @@ def main(argv=None) -> int:
     )
     print(report)
 
-    if args.note_out and args.note_skeleton:
-        try:
-            md = render_note(args.note_skeleton, args.note_sections,
-                             kv, offs, report)
-            out = Path(args.note_out)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(json.dumps(note_workflow(md), indent=2,
-                                      ensure_ascii=False))
-        except OSError as e:
-            # The report already reached the log; a note failure must not
-            # look like a boot failure.
-            print(f"[boot-report] could not write the note workflow: {e}",
-                  file=sys.stderr)
+    if args.notes_root and args.skeleton_dir:
+        for seq, (skeleton, folder, title) in enumerate(NOTES, 1):
+            try:
+                md = render_note(Path(args.skeleton_dir) / skeleton,
+                                 args.note_sections, kv, offs, report)
+                out = Path(args.notes_root) / folder / f"{title}.json"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(json.dumps(note_workflow(md, title, seq),
+                                          indent=2, ensure_ascii=False))
+            except OSError as e:
+                # The report already reached the log; a note failure must not
+                # look like a boot failure.
+                print(f"[boot-report] could not write the {title} note: {e}",
+                      file=sys.stderr)
     return 0
 
 

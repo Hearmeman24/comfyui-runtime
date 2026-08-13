@@ -9,9 +9,10 @@ for them to notice. These tests pin the two acceptance behaviors down:
   - anything degraded expands IN ITS ROW and always names the CONSEQUENCE,
     not just the fact ("Workflows using this model will error.").
 
-Also covered: the markdown-note "workflow" the renderer writes (a single
-MarkdownNote node, ComfyUI UI format, re-rendered every boot with the live
-report injected), the no-flags boot (the note must still be written), the
+Also covered: the three markdown-note "workflows" the renderer writes
+(welcome, adding models, troubleshooting; one MarkdownNote node each, ComfyUI
+UI format, re-rendered every boot with the live report injected into
+troubleshooting), the no-flags boot (the notes must still be written), the
 missing-pod-id fallback (no broken URL), and the customer-facing style rule
 (no em or en dashes anywhere).
 
@@ -26,7 +27,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 RENDERER = REPO / "src" / "boot_report.py"
-SKELETON = REPO / "src" / "readme_note.md"
+SKELETON_DIR = REPO / "src"
+
+# Order and naming must match boot_report.NOTES: welcome, then the models
+# guide, then troubleshooting, all sorting above the workflow set folders.
+NOTE_FOLDERS = ["!1 Welcome", "!2 Adding Models", "!3 Troubleshooting"]
+NOTE_TITLES = ["Welcome", "Adding Models", "Troubleshooting"]
 PROVISIONER = REPO / "src" / "provisioner.py"
 
 MB = 1024 * 1024
@@ -91,9 +97,16 @@ TEMPLATE = {
 }
 
 
+def note_md(root: Path, which: str) -> str:
+    """Read the rendered markdown of one note by its title."""
+    folder = NOTE_FOLDERS[NOTE_TITLES.index(which)]
+    doc = json.loads((root / folder / f"{which}.json").read_text())
+    return doc["nodes"][0]["widgets_values"][0]
+
+
 def render(d: Path, state_rows=None, manifest_entries=None,
            provision_status=None, hf_status=None, template=None,
-           note_out=None, sections=None):
+           notes_root=None, sections=None):
     cmd = [sys.executable, str(RENDERER),
            "--state", str(write_state(d, state_rows or CLEAN_STATE))]
     if manifest_entries is not None:
@@ -105,8 +118,9 @@ def render(d: Path, state_rows=None, manifest_entries=None,
         cmd += ["--hf-status", str(write_json(d, "hf_status.json", hf_status))]
     if template is not None:
         cmd += ["--template", str(write_json(d, "template.json", template))]
-    if note_out is not None:
-        cmd += ["--note-skeleton", str(SKELETON), "--note-out", str(note_out)]
+    if notes_root is not None:
+        cmd += ["--skeleton-dir", str(SKELETON_DIR),
+                "--notes-root", str(notes_root)]
         if sections is not None:
             cmd += ["--note-sections", str(sections)]
         else:
@@ -307,51 +321,80 @@ def test_provisioner_never_ran_renders_unknown_with_consequence():
         ok("  Workflows  unknown (provisioner did not run)" in out, out)
 
 
-def test_note_written_and_is_a_markdownnote_workflow():
+def test_three_notes_written_as_markdownnote_workflows():
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         manifest, status, hf = clean_model_fixtures(d)
-        note = d / "wf" / "!! Read This First" / "Read This First.json"
+        root = d / "wf"
         out = render(d, manifest_entries=manifest, provision_status=status,
-                     hf_status=hf, template=TEMPLATE, note_out=note)
-        ok(note.is_file(), "note not written")
-        doc = json.loads(note.read_text())
-        for key in ("nodes", "links", "groups", "config", "extra", "version",
-                    "last_node_id", "last_link_id"):
-            ok(key in doc, f"workflow shape missing {key}")
-        ok(len(doc["nodes"]) == 1, doc["nodes"])
-        node = doc["nodes"][0]
-        ok(node["type"] == "MarkdownNote", node)
-        md = node["widgets_values"][0]
-        # The live report is injected into the note, verbatim.
-        ok("ComfyUI is ready" in md and "3/3 downloaded" in md, md)
-        ok(out.strip().splitlines()[0] in md,
+                     hf_status=hf, template=TEMPLATE, notes_root=root)
+        ids = set()
+        for folder, title in zip(NOTE_FOLDERS, NOTE_TITLES):
+            note = root / folder / f"{title}.json"
+            ok(note.is_file(), f"{title} note not written")
+            doc = json.loads(note.read_text())
+            for key in ("nodes", "links", "groups", "config", "extra",
+                        "version", "last_node_id", "last_link_id"):
+                ok(key in doc, f"{title}: workflow shape missing {key}")
+            ok(len(doc["nodes"]) == 1, doc["nodes"])
+            node = doc["nodes"][0]
+            ok(node["type"] == "MarkdownNote", node)
+            ok(node["title"] == title, node)
+            ids.add(doc["id"])
+        ok(len(ids) == 3, f"note workflow ids must differ: {ids}")
+        # The folders sort in note order, and above workflow set folders.
+        listed = sorted(p.name for p in root.iterdir())
+        ok(listed == NOTE_FOLDERS, listed)
+        ok(sorted(NOTE_FOLDERS + ["Wan 2.2 I2V"])[:3] == NOTE_FOLDERS,
+           "notes must sort above workflow set folders")
+
+        # Welcome: identity, links, and the basic how-to with the real UI
+        # labels of the pinned frontend (Workflows tab, Run button).
+        welcome = note_md(root, "Welcome")
+        ok("HearmemanAI" in welcome, welcome)
+        ok("civitai.red/user/HearmemanAI" in welcome, welcome)
+        ok("discord.gg" in welcome, welcome)
+        ok("Workflows" in welcome and "Run" in welcome, welcome)
+        ok("Load Image" in welcome and "Load Video" in welcome, welcome)
+
+        # Adding models: the CivitAI guide with the canonical variables and
+        # the LoRA wget how-to with the real on-pod path.
+        adding = note_md(root, "Adding Models")
+        ok("CIVITAI_LORAS" in adding and "CIVITAI_CHECKPOINTS" in adding,
+           adding)
+        ok("civitai_token" in adding, adding)
+        ok("1081768,351306" in adding, adding)
+        ok("/workspace/ComfyUI/models/loras" in adding, adding)
+
+        # Troubleshooting: the live report verbatim, the missing-model steps
+        # (env var first, never Jupyter), and the switched-off list.
+        trouble = note_md(root, "Troubleshooting")
+        ok("ComfyUI is ready" in trouble and "3/3 downloaded" in trouble,
+           trouble)
+        ok(out.strip().splitlines()[0] in trouble,
            "report body not injected verbatim")
-        # The note's own content: the LoRA how-to with the real on-pod
-        # path, and the missing-model steps (env var first, never Jupyter).
-        ok("/workspace/ComfyUI/models/loras" in md, md)
-        ok("A model is missing" in md, md)
-        ok("discord.gg" in md, md)
-        # Nothing switched off on this boot.
-        ok("Nothing is switched off on this pod." in md, md)
+        ok("A model is missing" in trouble, trouble)
+        ok("JupyterLab" in trouble, trouble)
+        ok("discord.gg" in trouble, trouble)
+        ok("Nothing is switched off on this pod." in trouble, trouble)
 
 
 def test_note_rerendered_each_boot_with_current_report():
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         manifest, status, hf = clean_model_fixtures(d)
-        note = d / "wf" / "!! Read This First" / "Read This First.json"
+        root = d / "wf"
         render(d, manifest_entries=manifest, provision_status=status,
-               hf_status=hf, template=TEMPLATE, note_out=note)
-        first = json.loads(note.read_text())["nodes"][0]["widgets_values"][0]
+               hf_status=hf, template=TEMPLATE, notes_root=root)
+        first = note_md(root, "Troubleshooting")
         ok("3/3 downloaded" in first, first)
         # Next boot: one model gone missing. The note must tell THIS story.
         manifest.append(
             ("https://huggingface.co/o/r/resolve/main/gone.safetensors",
              str(d / "models" / "vae" / "gone.safetensors"), None))
         render(d, manifest_entries=manifest, provision_status=status,
-               hf_status=hf, template=TEMPLATE, note_out=note)
-        second = json.loads(note.read_text())["nodes"][0]["widgets_values"][0]
+               hf_status=hf, template=TEMPLATE, notes_root=root)
+        second = note_md(root, "Troubleshooting")
         ok("3/4 downloaded, 1 FAILED" in second, second)
         ok("gone.safetensors" in second, second)
 
@@ -361,13 +404,15 @@ def test_gate_both_ways_note_written_with_zero_flags():
         d = Path(td)
         status = {"mode": "walk", "enabled_flags": [],
                   "workflows_copied": [], "skipped": [], "user_supplied": []}
-        note = d / "wf" / "!! Read This First" / "Read This First.json"
+        root = d / "wf"
         out = render(d, manifest_entries=[], provision_status=status,
-                     template=TEMPLATE, note_out=note)
+                     template=TEMPLATE, notes_root=root)
         ok("  Workflows  none (no workflow sets enabled)" in out, out)
         ok("  Models     none requested (no download flags enabled)" in out,
            out)
-        ok(note.is_file(), "note must be written on EVERY boot, flags or not")
+        for folder, title in zip(NOTE_FOLDERS, NOTE_TITLES):
+            ok((root / folder / f"{title}.json").is_file(),
+               f"{title} note must be written on EVERY boot, flags or not")
 
 
 def test_off_entries_land_in_the_note():
@@ -380,10 +425,10 @@ def test_off_entries_land_in_the_note():
             ("off", "LTX-2.5 workflows",
              "Accept the licence on the model page, set HF_TOKEN, restart the pod."),
         ]
-        note = d / "wf" / "!! Read This First" / "Read This First.json"
+        root = d / "wf"
         render(d, rows, manifest_entries=manifest, provision_status=status,
-               hf_status=hf, template=TEMPLATE, note_out=note)
-        md = json.loads(note.read_text())["nodes"][0]["widgets_values"][0]
+               hf_status=hf, template=TEMPLATE, notes_root=root)
+        md = note_md(root, "Troubleshooting")
         ok("LTX-2.5 workflows" in md, md)
         ok("Accept the licence" in md, md)
         ok("Nothing is switched off" not in md, md)
@@ -395,23 +440,28 @@ def test_template_sections_injected_when_present():
         manifest, status, hf = clean_model_fixtures(d)
         sections = d / "note_sections.md"
         sections.write_text("## Wan specific\n\nUse the I2V workflow first.\n")
-        note = d / "wf" / "!! Read This First" / "Read This First.json"
+        root = d / "wf"
         render(d, manifest_entries=manifest, provision_status=status,
-               hf_status=hf, template=TEMPLATE, note_out=note,
+               hf_status=hf, template=TEMPLATE, notes_root=root,
                sections=sections)
-        md = json.loads(note.read_text())["nodes"][0]["widgets_values"][0]
-        ok("Use the I2V workflow first." in md, md)
+        # Template sections land in the welcome note, nowhere else.
+        ok("Use the I2V workflow first." in note_md(root, "Welcome"),
+           "template sections must land in the welcome note")
+        ok("Use the I2V workflow first."
+           not in note_md(root, "Troubleshooting"),
+           "template sections must not leak into troubleshooting")
 
 
 def test_no_em_or_en_dashes_anywhere():
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         manifest, status, hf = clean_model_fixtures(d)
-        note = d / "wf" / "!! Read This First" / "Read This First.json"
+        root = d / "wf"
         out = render(d, manifest_entries=manifest, provision_status=status,
-                     hf_status=hf, template=TEMPLATE, note_out=note)
-        md = json.loads(note.read_text())["nodes"][0]["widgets_values"][0]
-        for text, name in ((out, "report"), (md, "note")):
+                     hf_status=hf, template=TEMPLATE, notes_root=root)
+        texts = [(out, "report")]
+        texts += [(note_md(root, t), f"{t} note") for t in NOTE_TITLES]
+        for text, name in texts:
             ok("—" not in text, f"em dash in {name}")
             ok("–" not in text, f"en dash in {name}")
 
@@ -478,7 +528,7 @@ def main():
     test_not_ready_header_never_claims_ready()
     test_missing_pod_id_prints_port_not_a_broken_url()
     test_provisioner_never_ran_renders_unknown_with_consequence()
-    test_note_written_and_is_a_markdownnote_workflow()
+    test_three_notes_written_as_markdownnote_workflows()
     test_note_rerendered_each_boot_with_current_report()
     test_gate_both_ways_note_written_with_zero_flags()
     test_off_entries_land_in_the_note()

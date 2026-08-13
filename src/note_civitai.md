@@ -1,4 +1,4 @@
-# {{TEMPLATE_NAME}}: read this first
+# Adding models
 
 ## Download any CivitAI model straight into your pod
 
@@ -17,8 +17,8 @@ Then every time you deploy:
 1. Click Edit Template before you deploy, not after.
 2. Expand the environment variables tab.
 3. Paste your token into the civitai_token variable.
-4. Add the model IDs you want to download: LoRAs in
-   LORAS_IDS_TO_DOWNLOAD, checkpoints in CHECKPOINT_IDS_TO_DOWNLOAD.
+4. Add the model IDs you want to download: LoRAs in CIVITAI_LORAS,
+   checkpoints in CIVITAI_CHECKPOINTS.
 
 The model ID is the second part of the AIR on the model page. For more
 than one, separate them with commas:
@@ -56,42 +56,3 @@ wget "https://huggingface.co/username/my-lora/resolve/main/my-lora.safetensors"
 
 4. When the download finishes, go back to ComfyUI and press R to refresh.
    Your LoRA now shows up in the LoRA loader's list.
-
-## A model is missing
-
-If a workflow that comes with this template cannot find its model, do not
-upload the model yourself through JupyterLab. That is the most common
-mistake, and it does not fix the real problem. Do this instead:
-
-1. Check the environment variable for that model set. On RunPod open your
-   pod, click Edit Pod, and look at the environment variables. If the
-   value is wrong, fix it and restart the pod. The models download on the
-   next boot.
-2. If the variable is set correctly and the model is still missing, ask
-   for help in Discord: https://discord.gg/ZVWVhT43GW. Paste the "This
-   boot" block from below.
-
-## This boot
-
-This block describes the boot that just finished. Support will ask you to
-paste it.
-
-```
-{{DEPLOYMENT_REPORT}}
-```
-
-About the SageAttn line: SageAttention makes generation faster. It is on
-automatically when your GPU supports it. If the line says DISABLED, your
-GPU has no support for it, so it switched itself off. Everything still
-works, generation is a bit slower, and there is nothing for you to fix.
-
-## Switched off on this pod
-
-{{DISABLED_FEATURES}}
-
-{{TEMPLATE_SECTIONS}}
-
-## Links
-
-- More models and workflows: https://civitai.red/user/HearmemanAI
-- Help and support: https://discord.gg/ZVWVhT43GW

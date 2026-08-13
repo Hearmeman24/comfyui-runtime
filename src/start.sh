@@ -625,12 +625,24 @@ if [ -f "$TEMPLATE_DIR/src/hooks/pre_launch.sh" ]; then
              report_warn "pre_launch hook returned nonzero"; }
 fi
 
+# Per-pod escape hatch for upstream ComfyUI bugs. Anything in
+# COMFY_EXTRA_ARGS is appended to the launch verbatim and word-split on
+# purpose, so a customer can pass several flags without us cutting a tag.
+# Known use today: --disable-dynamic-vram, which works around
+# Comfy-Org/ComfyUI#15271 (illegal memory access in the AIMDO vbar prefetch
+# path, MiniMax M3). See the triage block below.
+COMFY_EXTRA_ARGS="${COMFY_EXTRA_ARGS:-}"
+if [ -n "$COMFY_EXTRA_ARGS" ]; then
+    echo "🧩 Extra ComfyUI args: $COMFY_EXTRA_ARGS"
+fi
+
 # Launch ComfyUI ONCE, nohup'ed, never restarted to add a flag. Never pipe
 # the launch to tee while capturing $! (that names tee, not python;
 # CLAUDE.md section 6). No PID is captured here at all.
 echo "▶️  Starting ComfyUI"
+# shellcheck disable=SC2086  # all three are deliberately word-split
 nohup python3 "$COMFYUI_DIR/main.py" --listen --enable-cors-header '*' \
-    $SAGE_FLAG $EXTRA_PATHS_FLAG \
+    $SAGE_FLAG $EXTRA_PATHS_FLAG $COMFY_EXTRA_ARGS \
     > "$NETWORK_VOLUME/comfyui_${RUNPOD_POD_ID}_nohup.log" 2>&1 &
 
 # Liveness check, then the numbered self-serve triage block.

@@ -331,14 +331,14 @@ def test_prose_is_not_a_filename():
     bare_url = "https://huggingface.co/org/repo/resolve/main/foo_vae.safetensors"
     reg = {
         "foo_vae.safetensors": hf_entry("foo_vae.safetensors", "vae"),
-        "my favourite lora.safetensors": hf_entry("my favourite lora.safetensors", "loras"),
+        "my favourite extremely long descriptive lora name rank 105 bf16.safetensors": hf_entry("my favourite extremely long descriptive lora name rank 105 bf16.safetensors", "loras"),
     }
     with tempfile.TemporaryDirectory() as tmp:
         wdir = make_workflows(tmp, {
             "Note.json": wf(top=[prose]),
             "Url.json": wf(top=[bare_url]),
-            "Spaced.json": wf(top=["my favourite lora.safetensors"]),
-            "SpacedStray.json": wf(top=["vae/my favourite lora.safetensors"]),
+            "Spaced.json": wf(top=["my favourite extremely long descriptive lora name rank 105 bf16.safetensors"]),
+            "SpacedStray.json": wf(top=["vae/my favourite extremely long descriptive lora name rank 105 bf16.safetensors"]),
             "Stray.json": wf(top=["vae/foo_vae.safetensors"]),
         })
         errors, warnings = vm.check_coverage(reg, wdir)
@@ -353,7 +353,11 @@ def test_prose_is_not_a_filename():
           "a filename containing spaces resolves cleanly against its registry entry")
     check(any("SpacedStray.json" in e for e in errors),
           "a spaced filename with a wrong prefix must still ERROR, which is the only "
-          "observable proof it was COLLECTED rather than silently skipped")
+          "observable proof it was COLLECTED rather than silently skipped. It is also "
+          "long (79 chars with the prefix) and contains a slash, so this one case "
+          "guards against a whitespace rule, a slash rule and any length cutoff. The "
+          "family's longest real reference is 75 chars, so a len<64 heuristic would "
+          "silently drop live ltx2 references")
     check(any("Stray.json" in e for e in errors),
           "a genuinely wrong folder prefix must still be a hard error")
     print("ok: prose and URLs skipped; spaced filenames still checked")

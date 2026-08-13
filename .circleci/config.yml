@@ -269,6 +269,11 @@ workflows:
   version: 2
 
   verify_and_build:
+    # Skipped for the weekly scheduled pipeline, which exists only to run
+    # scheduled_validation; pushes and tags are unaffected.
+    when:
+      not:
+        equal: [scheduled_pipeline, << pipeline.trigger_source >>]
     jobs:
       # verify runs on every branch push AND on tags, so it can gate build_base
       # (a tag-filtered job's dependencies must themselves run on tags).
@@ -288,19 +293,14 @@ workflows:
             branches:
               ignore: /.*/
 
-  # Weekly, Mondays 06:00 UTC, main only. NOTE: this is the in-config
-  # scheduled-workflow form. It validates and works on classic project
-  # hookups; if this project is connected via the GitHub App integration,
-  # CircleCI may require the equivalent "scheduled pipeline" created once via
-  # API instead (POST /api/v2/project/:slug/schedule) - verify on first Monday
-  # after the project is created and migrate if it did not fire.
+  # Weekly, Mondays 06:00 UTC, main only. This project is connected via the
+  # GitHub App integration, where CircleCI ignores the in-config
+  # scheduled-workflow (`triggers:`) form, so the schedule lives in a
+  # "scheduled pipeline" created once via
+  # POST /api/v2/project/:slug/schedule (2026-08-13). This workflow gates on
+  # that pipeline's trigger_source.
   weekly_url_validation:
-    triggers:
-      - schedule:
-          cron: "0 6 * * 1"
-          filters:
-            branches:
-              only:
-                - main
+    when:
+      equal: [scheduled_pipeline, << pipeline.trigger_source >>]
     jobs:
       - scheduled_validation

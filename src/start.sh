@@ -16,9 +16,27 @@ RUNTIME_DIR="/comfyui-runtime"
 TEMPLATE_JSON="$TEMPLATE_DIR/template.json"
 export TEMPLATE_DIR RUNTIME_DIR
 
+# ---------------------------------------------------------------------------
+# Boot report state (EXECUTION.md item N1). Failures warn and continue
+# (decision #19), so the deployment report printed at the END of boot is the
+# only place a customer learns something degraded. Every phase below records
+# what happened into this state file; boot_report.py renders it once, to the
+# log and into the read-me note workflow. Hooks are sourced, so they can call
+# report_warn / report_off too (e.g. ltx2's licence preflight, decision #18).
+# ---------------------------------------------------------------------------
+BOOT_STATE="/tmp/boot_report_state.tsv"
+: > "$BOOT_STATE"
+report_kv()   { printf 'set\t%s\t%s\n' "$1" "$2" >> "$BOOT_STATE"; }
+report_warn() { printf 'warn\t%s\n' "$1" >> "$BOOT_STATE"; }
+report_off()  { printf 'off\t%s\t%s\n' "$1" "$2" >> "$BOOT_STATE"; }
+export BOOT_STATE
+report_kv template_name "$(basename "${TEMPLATE_DIR:-unknown}")"
+report_kv pod_id "${RUNPOD_POD_ID:-}"
+
 if [ -z "$TEMPLATE_DIR" ] || [ ! -f "$TEMPLATE_JSON" ]; then
     echo "❌ template.json not found at '$TEMPLATE_JSON' (arg 1 must be the template repo dir)."
     echo "   Booting degraded: no models will be provisioned and no custom nodes cloned."
+    report_warn "template.json not found; no models provisioned, no custom nodes cloned"
 fi
 
 # Read one value out of template.json. Dotted path; booleans print true/false,
@@ -47,21 +65,28 @@ PY
 # Print both pins so every support log names the runtime SHA and base tag
 # (CONTRACTS.md section 6, plan D2).
 if [ -f "$TEMPLATE_DIR/pins.json" ]; then
+    # Prints the pins line AND records both values for the boot report.
     python3 - "$TEMPLATE_DIR/pins.json" <<'PY'
 import json
+import os
 import sys
 
 try:
     pins = json.load(open(sys.argv[1]))
-    print("📌 pins.json: runtime_ref=%s base_image=%s"
-          % (pins.get("runtime_ref", "?"), pins.get("base_image", "?")))
+    ref = pins.get("runtime_ref", "?")
+    base = pins.get("base_image", "?")
+    print("📌 pins.json: runtime_ref=%s base_image=%s" % (ref, base))
+    with open(os.environ["BOOT_STATE"], "a") as f:
+        f.write("set\truntime_ref\t%s\nset\tbase_image\t%s\n" % (ref, base))
 except Exception as exc:
     print("⚠️  Could not read pins.json: %r" % (exc,))
 PY
 else
     echo "⚠️  pins.json not found at $TEMPLATE_DIR/pins.json"
 fi
-echo "📌 comfyui-runtime checkout: $(git -C "$RUNTIME_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+RUNTIME_SHA="$(git -C "$RUNTIME_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+echo "📌 comfyui-runtime checkout: $RUNTIME_SHA"
+report_kv runtime_sha "$RUNTIME_SHA"
 
 # Use libtcmalloc for better memory management
 TCMALLOC="$(ldconfig -p | grep -Po "libtcmalloc.so.\d" | head -n 1)"
@@ -113,6 +138,7 @@ else
     echo "   Global Networking pods have no public DNS. Deploy a new pod with Global Networking"
     echo "   DISABLED. This is a RunPod pod setting, not a GitHub or HuggingFace outage."
     echo "   Model downloads, custom node installs and version resolution will all fail until DNS works."
+    report_warn "DNS is broken on this pod (RunPod Global Networking enabled?); downloads likely failed"
 fi
 
 if [ "$NETWORK_VOLUME" = "/" ]; then
@@ -234,6 +260,7 @@ esac
 
 if [ -z "$TARGET_COMFY_SHA" ]; then
     echo "⚠️  COMFYUI_VERSION=$COMFYUI_VERSION could not be resolved. ComfyUI stays at $CURRENT_COMFY_SHA."
+    report_warn "COMFYUI_VERSION=$COMFYUI_VERSION could not be resolved; ComfyUI stayed where it was"
 elif [ "$TARGET_COMFY_SHA" != "$CURRENT_COMFY_SHA" ]; then
     # Make sure the target's objects are local (approved's always are, from
     # the base clone), then move. Requirements reinstall runs under the
@@ -248,6 +275,7 @@ elif [ "$TARGET_COMFY_SHA" != "$CURRENT_COMFY_SHA" ]; then
         link_volume_dirs
     else
         echo "⚠️  Could not move ComfyUI to $TARGET_COMFY_SHA. ComfyUI stays at $CURRENT_COMFY_SHA."
+        report_warn "Could not move ComfyUI to the requested version; it stayed at ${CURRENT_COMFY_SHA:0:7}"
     fi
 else
     echo "✅ ComfyUI already at $CURRENT_COMFY_SHA (COMFYUI_VERSION=$COMFYUI_VERSION)."
@@ -256,7 +284,13 @@ if [ "$COMFYUI_VERSION" != "approved" ]; then
     echo "⚠️  COMFYUI_VERSION=$COMFYUI_VERSION: the bundled workflows were validated against the approved"
     echo "    ComfyUI ref only. Upstream changes can break subgraph-based workflows with no warning."
     echo "    Set COMFYUI_VERSION=approved and restart the pod to return to the validated version."
+    report_warn "COMFYUI_VERSION=$COMFYUI_VERSION: bundled workflows were only validated on the approved ref"
 fi
+
+# Record what ComfyUI we actually ended up on, for the deployment report.
+report_kv comfy_sha "$(git -C "$COMFYUI_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+report_kv comfy_version "$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$COMFYUI_DIR/comfyui_version.py" 2>/dev/null)"
+report_kv comfy_mode "$COMFYUI_VERSION"
 
 # ---------------------------------------------------------------------------
 # SageAttention: three synchronous steps (CONTRACTS.md sections 8/9, plan D9).
@@ -265,6 +299,7 @@ fi
 # 3. run the kernel probe. The probe prints the verdict line; nothing extra.
 # ---------------------------------------------------------------------------
 TORCH_CUDA_MAJOR="$(python3 -c 'import torch; print((torch.version.cuda or "").split(".")[0])' 2>/dev/null)"
+report_kv gpu_name "$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1)"
 SAGE_FLAG=""
 if [ "$(template_json_get sage)" = "true" ]; then
     case "$TORCH_CUDA_MAJOR" in
@@ -272,6 +307,7 @@ if [ "$(template_json_get sage)" = "true" ]; then
         13) SAGE_WHEEL_DIR="/opt/sage/cu130" ;;
         *)  SAGE_WHEEL_DIR=""
             echo "⚠️  Unrecognized torch CUDA major '${TORCH_CUDA_MAJOR:-unknown}'. No SageAttention wheel installed."
+            report_warn "Unrecognized torch CUDA major '${TORCH_CUDA_MAJOR:-unknown}'; no SageAttention wheel installed"
             ;;
     esac
     if [ -n "$SAGE_WHEEL_DIR" ]; then
@@ -282,20 +318,30 @@ if [ "$(template_json_get sage)" = "true" ]; then
         if [ -n "$SAGE_WHEEL" ]; then
             echo "⚡ Installing baked SageAttention wheel: $SAGE_WHEEL"
             pip install --no-deps --force-reinstall "$SAGE_WHEEL" > /tmp/sage_wheel.log 2>&1 \
-                || echo "⚠️  SageAttention wheel install failed (see /tmp/sage_wheel.log)."
+                || { echo "⚠️  SageAttention wheel install failed (see /tmp/sage_wheel.log)."
+                     report_warn "SageAttention wheel install failed (see /tmp/sage_wheel.log)"; }
         else
             echo "⚠️  No SageAttention wheel found under $SAGE_WHEEL_DIR."
+            report_warn "No SageAttention wheel found under $SAGE_WHEEL_DIR"
         fi
     fi
     # The probe owns the messaging for pass / unsupported arch / failure
     # (its arch check runs before the sageattention import, so it gives the
-    # right verdict even when the wheel is absent).
-    python3 "$RUNTIME_DIR/src/sage_probe.py"
-    if [ $? -eq 0 ]; then
-        SAGE_FLAG="--use-sage-attention"
-    fi
+    # right verdict even when the wheel is absent). Its one line is captured
+    # for the deployment report and relayed to the log unchanged.
+    SAGE_PROBE_MSG="$(python3 "$RUNTIME_DIR/src/sage_probe.py")"
+    sage_probe_rc=$?
+    [ -n "$SAGE_PROBE_MSG" ] && echo "$SAGE_PROBE_MSG"
+    report_kv sage_msg "$SAGE_PROBE_MSG"
+    case "$sage_probe_rc" in
+        0) SAGE_FLAG="--use-sage-attention"
+           report_kv sage enabled ;;
+        2) report_kv sage unsupported ;;
+        *) report_kv sage probe_failed ;;
+    esac
 else
     echo "⏭️  SageAttention disabled for this template (template.json sage != true)."
+    report_kv sage off_template
 fi
 
 # CivitAI downloader: baked at /usr/local/bin by the base image; the clone is
@@ -351,7 +397,9 @@ for entry in "${CUSTOM_NODE_REPOS[@]}"; do
 
     if [ ! -d "$dir/.git" ]; then
         echo "📥 Cloning $name..."
-        git clone "$url" "$dir" || { echo "❌ Failed to clone $name. Its nodes will be missing."; continue; }
+        git clone "$url" "$dir" || { echo "❌ Failed to clone $name. Its nodes will be missing."
+                                     report_warn "Failed to clone custom node $name; its nodes are missing"
+                                     continue; }
     elif [ -n "$pin" ]; then
         git -C "$dir" fetch --quiet origin 2>/dev/null || true
     else
@@ -382,14 +430,20 @@ if [ -f "$TEMPLATE_DIR/src/hooks/pre_download.sh" ]; then
     echo "🪝 Sourcing pre_download hook..."
     # shellcheck disable=SC1091
     source "$TEMPLATE_DIR/src/hooks/pre_download.sh" \
-        || echo "⚠️  pre_download hook returned nonzero (continuing)."
+        || { echo "⚠️  pre_download hook returned nonzero (continuing)."
+             report_warn "pre_download hook returned nonzero"; }
 fi
 
 # Provisioner: flag state, quant/precision and variant choice are read from
 # the process environment, mapped through template.json (CONTRACTS.md
 # section 3). Exit 2 or 1 prints one loud line; boot continues.
+# PROVISION_STATUS_FILE feeds the deployment report (workflow sets enabled,
+# models already on disk); without it the report renders "unknown" rows.
 echo "🧩 Provisioning workflows + download manifest..."
 mkdir -p "$WORKFLOW_DIR"
+PROVISION_STATUS_FILE="/tmp/provision_status.json"
+export PROVISION_STATUS_FILE
+rm -f "$PROVISION_STATUS_FILE"
 python3 "$RUNTIME_DIR/src/provisioner.py" \
     --template "$TEMPLATE_DIR/template.json" \
     --registry "$TEMPLATE_DIR/src/models_registry.json" \
@@ -400,12 +454,17 @@ python3 "$RUNTIME_DIR/src/provisioner.py" \
 provisioner_rc=$?
 if [ "$provisioner_rc" -ne 0 ]; then
     echo "❌ Provisioner exited $provisioner_rc. Model provisioning is incomplete; booting anyway (missing models surface as red nodes)."
+    report_warn "Provisioner exited $provisioner_rc; model provisioning is incomplete"
 fi
 
 # Downloader, EXIT CODE CHECKED (wan does not check it today, start.sh:257;
 # that bug dies here, CONTRACTS.md section 12.6). Nonzero: one line, boot
-# continues. The manager's own final snapshot names each failed entry.
+# continues. The manager's own final snapshot names each failed entry, and
+# HF_STATUS_FILE hands the deployment report each failure's reason.
 echo "🔽 Starting HF download manager..."
+HF_STATUS_FILE="/tmp/hf_download_status.json"
+export HF_STATUS_FILE
+rm -f "$HF_STATUS_FILE"
 python3 "$RUNTIME_DIR/src/hf_download_manager.py" "$HF_QUEUE_FILE"
 downloader_rc=$?
 if [ "$downloader_rc" -ne 0 ]; then
@@ -469,6 +528,7 @@ for name in "${!PIP_INSTALL_PIDS[@]}"; do
         echo "✅ $name requirements installed"
     else
         echo "❌ $name requirements install failed (see /tmp/pip_${name}.log). Its nodes may not load."
+        report_warn "$name requirements install failed; its nodes may not load"
     fi
 done
 
@@ -480,6 +540,7 @@ if ! /opt/venv/bin/python -c \
     'import onnxruntime as o, sys; sys.exit(0 if "CUDAExecutionProvider" in o.get_available_providers() else 1)' \
     2>/dev/null; then
     echo "⚙️  onnxruntime CUDA provider missing. Reinstalling onnxruntime-gpu..."
+    report_warn "A node install clobbered onnxruntime-gpu; it was reinstalled at boot"
     pip uninstall -y onnxruntime onnxruntime-gpu 2>/dev/null || true
     if [ "$TORCH_CUDA_MAJOR" = "13" ]; then
         pip install onnxruntime-gpu
@@ -495,7 +556,8 @@ if [ -f "$TEMPLATE_DIR/src/hooks/pre_launch.sh" ]; then
     echo "🪝 Sourcing pre_launch hook..."
     # shellcheck disable=SC1091
     source "$TEMPLATE_DIR/src/hooks/pre_launch.sh" \
-        || echo "⚠️  pre_launch hook returned nonzero (continuing)."
+        || { echo "⚠️  pre_launch hook returned nonzero (continuing)."
+             report_warn "pre_launch hook returned nonzero"; }
 fi
 
 # Launch ComfyUI ONCE, nohup'ed, never restarted to add a flag. Never pipe
@@ -537,9 +599,31 @@ until curl --silent --fail "$URL" --output /dev/null; do
     counter=$((counter + 2))
 done
 
+# ---------------------------------------------------------------------------
+# Deployment report (EXECUTION.md item N1), replacing the old "ComfyUI is
+# Ready" line. The liveness verdict above decides the header: the report
+# never claims ready when 8188 is dead. The body is generated ONCE by
+# boot_report.py and rendered twice from the same string: here (the pod log)
+# and into the read-me MarkdownNote workflow (item N2), which is re-rendered
+# on EVERY boot regardless of flags so its report always describes THIS boot.
+# The note bypasses the provisioner's flag-gated copy on purpose.
+# ---------------------------------------------------------------------------
 if curl --silent --fail "$URL" --output /dev/null; then
-    echo "🚀 ComfyUI is UP"
+    report_kv ready true
+else
+    report_kv ready false
+    report_warn "ComfyUI did not answer on port 8188 within ${max_wait}s"
 fi
+python3 "$RUNTIME_DIR/src/boot_report.py" \
+    --state "$BOOT_STATE" \
+    --template "$TEMPLATE_JSON" \
+    --manifest "$HF_QUEUE_FILE" \
+    --provision-status "$PROVISION_STATUS_FILE" \
+    --hf-status "$HF_STATUS_FILE" \
+    --note-skeleton "$RUNTIME_DIR/src/readme_note.md" \
+    --note-sections "$TEMPLATE_DIR/src/note_sections.md" \
+    --note-out "$WORKFLOW_DIR/!! Read This First/Read This First.json" \
+    || echo "⚠️  Deployment report renderer failed; the full boot log is at $NETWORK_VOLUME/comfyui.log"
 
 # Never let the container exit when ComfyUI dies.
 sleep infinity

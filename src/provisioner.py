@@ -280,6 +280,20 @@ def build(queued: dict, models_root: Path) -> tuple:
     return lines, skipped
 
 
+def write_status(env, payload) -> None:
+    """Optional boot-report feed (EXECUTION.md item N1): when
+    PROVISION_STATUS_FILE is set in the environment, write a machine-readable
+    summary of what this run decided, for boot_report.py. Never fatal; the
+    deployment report renders "unknown" rows without it."""
+    path = env.get("PROVISION_STATUS_FILE")
+    if not path:
+        return
+    try:
+        Path(path).write_text(json.dumps(payload, indent=1))
+    except OSError as e:
+        print(f"[provisioner] could not write status file: {e}")
+
+
 def provision(args, env) -> int:
     try:
         template = json.loads(Path(args.template).read_text())
@@ -310,6 +324,9 @@ def provision(args, env) -> int:
               "no workflows copied")
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text("")
+        write_status(env, {"mode": mode, "enabled_flags": [],
+                           "workflows_copied": [], "skipped": [],
+                           "user_supplied": []})
         return 0
 
     try:
@@ -376,6 +393,14 @@ def provision(args, env) -> int:
     lines, skipped = build(queued, models_root)
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text("\n".join(lines) + ("\n" if lines else ""))
+    write_status(env, {
+        "mode": mode,
+        "enabled_flags": enabled,
+        "workflows_copied": [str(dest.relative_to(dst_root))
+                             for dest, _ in out_docs],
+        "skipped": skipped,
+        "user_supplied": sorted(user_supplied),
+    })
 
     print(f"[provisioner] mode: {mode}  "
           f"flags: {','.join(enabled) or '(none)'}")

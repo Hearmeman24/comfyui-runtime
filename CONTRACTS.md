@@ -735,6 +735,7 @@ Not called by `start.sh`; listed so slices E and D freeze the same surface.
 | `HF_TOKEN` | unset | user-supplied only; gates `gated` registry entries; never baked |
 | `CHECKPOINT_IDS_TO_DOWNLOAD`, `LORAS_IDS_TO_DOWNLOAD` | `replace_with_ids` | CivitAI ID lists (wan `start.sh:260-263`) |
 | `civitai_token` / `CIVITAI_TOKEN` / `CIVITAI_API_KEY` | unset | all three accepted (`CLAUDE.md` §3) |
+| `COMFY_EXTRA_ARGS` | unset | appended verbatim to the ComfyUI launch, word-split. Escape hatch for upstream bugs without cutting a tag; echoed at boot when set (`src/start.sh:628-637`) |
 | per-template flags, quant/precision/variant envs | per `template.json` | §3, §5 |
 | `CUDA_VARIANT` | dead at boot | the sage path no longer reads it (selection is by `torch.version.cuda`, plan D9); the env survives only as a Docker build ARG in templates |
 

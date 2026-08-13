@@ -206,6 +206,39 @@ def model_rows(manifest, provision, hf_status) -> list:
     return lines
 
 
+def volume_copy_rows(manifest) -> list:
+    """Models still living on local disk, waiting for the background copy.
+
+    A staged model is a symlink into /hf_stage: fully usable right now, but it
+    does not survive the pod. The report renders once, before the copy is done,
+    so it must state what is pending rather than imply everything is durable.
+    The completion line lands in the boot log, not here.
+    """
+    pending = []
+    for e in manifest or []:
+        dest = e["dest"]
+        try:
+            if dest.is_symlink() and dest.exists():
+                pending.append(dest.stat().st_size)
+        except OSError:
+            continue
+    if not pending:
+        return []
+    n = len(pending)
+    total = sum(pending)
+    for unit in ("B", "KB", "MB", "GB"):
+        if total < 1024:
+            size = f"{total:.1f}{unit}"
+            break
+        total /= 1024
+    else:
+        size = f"{total:.1f}TB"
+    return [row("Volume copy", f"{n} model{'s' if n != 1 else ''}, {size} "
+                               f"still copying"),
+            CONT + "They work now. Wait for the "
+                   "\"safe to restart\" line in the log before restarting."]
+
+
 def workflow_row(provision, template) -> str:
     if provision is None:
         return row("Workflows", "unknown (provisioner did not run)")
@@ -262,6 +295,7 @@ def render_report(kv, warnings, manifest, provision, hf_status,
              row("GPU", f"{gpu} (sm{sm})" if sm else gpu)]
     lines += sage_rows(kv)
     lines += model_rows(manifest, provision, hf_status)
+    lines += volume_copy_rows(manifest)
     lines.append(workflow_row(provision, template))
     lines += warning_rows(warnings)
     lines.append(RULE)

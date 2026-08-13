@@ -35,6 +35,9 @@ NOTE_FOLDERS = ["!1 Welcome", "!2 Adding Models", "!3 Troubleshooting"]
 NOTE_TITLES = ["Welcome", "Adding Models", "Troubleshooting"]
 PROVISIONER = REPO / "src" / "provisioner.py"
 
+sys.path.insert(0, str(REPO / "src"))
+import boot_report as br  # noqa: E402
+
 MB = 1024 * 1024
 
 CHECKS = 0
@@ -516,7 +519,39 @@ def test_end_to_end_with_the_real_provisioner():
         ok("  Workflows  Wan 2.2 I2V (1 set)" in rr.stdout, rr.stdout)
 
 
+def test_volume_copy_row():
+    """A model still staged must be reported as pending, not as durable."""
+    tmpdir = tempfile.mkdtemp()
+    tmp = Path(tmpdir)
+    models = tmp / "models"
+    models.mkdir(parents=True)
+    stage = tmp / "hf_stage"
+    stage.mkdir()
+
+    landed = models / "landed.safetensors"
+    landed.write_bytes(b"\0" * 2048)
+    target = stage / "staged.safetensors"
+    target.write_bytes(b"\0" * 4096)
+    staged = models / "staged.safetensors"
+    staged.symlink_to(target)
+    dead = models / "dead.safetensors"
+    dead.symlink_to(stage / "gone.safetensors")
+
+    manifest = [{"url": "u", "dest": p, "floor": 1} for p in (landed, staged, dead)]
+    rows = br.volume_copy_rows(manifest)
+    joined = "\n".join(rows)
+    ok(rows, "a staged model must produce a pending row")
+    ok("1 model," in joined, f"only the live symlink counts: {joined}")
+    ok("4.0KB" in joined, f"size must come from the staged file: {joined}")
+    ok("safe to restart" in joined.lower(), "must tell the user when it is durable")
+
+    ok(br.volume_copy_rows([{"url": "u", "dest": landed, "floor": 1}]) == [],
+       "a fully landed model must produce no pending row")
+    ok(br.volume_copy_rows(None) == [], "no manifest, no row")
+
+
 def main():
+    test_volume_copy_row()
     test_clean_boot_is_compact()
     test_failed_model_expands_with_consequence()
     test_failed_model_without_status_entry_still_named()

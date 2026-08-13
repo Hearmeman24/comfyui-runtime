@@ -625,6 +625,36 @@ if [ -f "$TEMPLATE_DIR/src/hooks/pre_launch.sh" ]; then
              report_warn "pre_launch hook returned nonzero"; }
 fi
 
+# Background stage->volume copy. The download manager publishes each model as
+# a symlink into /hf_stage so ComfyUI can serve it at NVMe speed immediately;
+# this detaches the actual crossing of the network volume so the boot never
+# waits on it. Spawned whenever ANY manifest entry is still a symlink, not only
+# when something downloaded this boot: a pod restarted before the copy finished
+# has live symlinks and nothing to download (spec section 2b, row 3).
+#
+# Survives because start.sh ends in sleep infinity, so nothing reaps it. Output
+# goes to the pod's stdout (where the user reads it) and to the volume log.
+if python3 - "$HF_QUEUE_FILE" <<'PY'
+import os, sys
+from pathlib import Path
+m = Path(sys.argv[1])
+if not m.is_file():
+    sys.exit(1)
+for raw in m.read_text().splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#") or "\t" not in line:
+        continue
+    if Path(line.split("\t")[1]).is_symlink():
+        sys.exit(0)
+sys.exit(1)
+PY
+then
+    echo "📦 Models are on local disk and usable now; copying them to your network volume in the background."
+    nohup python3 "$RUNTIME_DIR/src/volume_sync.py" "$HF_QUEUE_FILE" \
+        > >(tee -a "$NETWORK_VOLUME/comfyui.log") 2>&1 &
+    report_kv volume_sync running
+fi
+
 # Per-pod escape hatch for upstream ComfyUI bugs. Anything in
 # COMFY_EXTRA_ARGS is appended to the launch verbatim and word-split on
 # purpose, so a customer can pass several flags without us cutting a tag.

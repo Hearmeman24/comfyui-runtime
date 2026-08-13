@@ -1,0 +1,306 @@
+# .circleci/config.yml (CircleCI 2.1) for comfyui-runtime
+#
+# Two jobs:
+#   verify     - every push, cheap, no contexts (doubles as the project connection test)
+#   build_base - git tag only, builds and pushes BOTH base variants
+#                (hearmeman/comfyui-base:cu128-comfy<ref>-torch<ver> and cu130-...)
+#
+# Family rules honored (comfy/CLAUDE.md section 7):
+#   - builds fire on a vN tag only
+#   - docker_layer_caching stays on, dedicated :buildcache-<variant> tags, :latest never touched
+#   - no heredocs in run.command (CircleCI 2.1 parses << as parameter syntax);
+#     multi-line checks that would need one belong in tools/, called by path
+version: 2.1
+
+executors:
+  docker-dind:
+    # Mirrors comfyui-wan/comfyui-ltx2: machine executor gives a full Docker
+    # daemon + BuildKit; docker_layer_caching preserves the BuildKit cache
+    # volume across builds on the same node. Per plan section 5c this demotes
+    # to a mild optimisation for the base (the fragile resolve surface is the
+    # deliberate, rarely-run torch layer), but there is no reason to drop it.
+    machine:
+      image: ubuntu-2404:current
+      docker_layer_caching: true
+    resource_class: xlarge
+    environment:
+      DOCKER_BUILDKIT: 1
+      COMPOSE_DOCKER_CLI_BUILD: 1
+
+  python:
+    docker:
+      - image: cimg/python:3.12
+
+commands:
+  notify-flowbot:
+    description: Send a webhook notification to FlowBot
+    parameters:
+      message:
+        type: string
+    steps:
+      - run:
+          name: Notify FlowBot
+          when: always
+          command: |
+            if [ -z "$FLOWBOT_WEBHOOK_URL" ] || [ -z "$FLOWBOT_WEBHOOK_TOKEN" ]; then
+              echo "Missing webhook env vars, skipping notification."
+              exit 0
+            fi
+            curl -s -X POST "${FLOWBOT_WEBHOOK_URL}/hooks/agent" \
+              -H "Authorization: Bearer ${FLOWBOT_WEBHOOK_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"message\": \"<< parameters.message >>\", \"source\": \"circleci\"}"
+
+  build-base-variant:
+    description: >
+      Build and push one base variant. The four per-variant --build-arg
+      overrides of the old template configs (comfyui-wan/.circleci/config.yml:90-93)
+      collapse to the variant's own base args: CUDA_VARIANT picks the
+      torch/cu<NNN>.txt trio inside base/Dockerfile, CUDA_BASE_IMAGE picks the
+      CUDA devel base. The torch trio itself is never spelled here; the
+      Dockerfile reads it from torch/<variant>.txt (plan D10), and this command
+      reads the same file only to compose the tag. The variant-matched sage
+      import assertion runs INSIDE the image build (plan section 5c), not as a
+      CI step.
+    parameters:
+      variant:
+        type: string # cu128 | cu130
+      cuda_base_image:
+        type: string
+    steps:
+      - run:
+          name: Build & push base << parameters.variant >> (DLC + registry cache)
+          command: |
+            VARIANT="<< parameters.variant >>"
+            IMG="docker.io/$DOCKERHUB_USER/comfyui-base"
+
+            # Tag grammar (CONTRACTS.md section 6, plan section 5c "Tagging"):
+            #   <cuNNN>-comfy<ref>-torch<ver>, e.g. cu128-comfy0.32.0-torch2.11.0
+            # COMFYUI_REF comes from the ARG default in base/Dockerfile (the
+            # base owns the ComfyUI version choice); torch ver from the
+            # canonical trio file. Fail loudly if either is unreadable rather
+            # than pushing a malformed tag.
+            COMFY_REF=$(grep -m1 -E '^ARG COMFYUI_REF=' base/Dockerfile | cut -d= -f2- | tr -d '"' | tr -d "'")
+            if [ -z "$COMFY_REF" ]; then
+              echo "FATAL: could not read ARG COMFYUI_REF=<ref> from base/Dockerfile"
+              exit 1
+            fi
+            TORCH_VER=$(grep -m1 -E '^torch==' "torch/${VARIANT}.txt" | sed 's/^torch==//')
+            if [ -z "$TORCH_VER" ]; then
+              echo "FATAL: could not read torch pin from torch/${VARIANT}.txt"
+              exit 1
+            fi
+            # Strip a leading "v" from the ComfyUI ref for the tag only. The ARG
+            # itself must stay a valid git ref (v0.32.0), but CONTRACTS.md section 6
+            # specifies the tag form as cu128-comfy0.32.0-torch2.11.0, without it.
+            COMFY_REF_TAG="${COMFY_REF#v}"
+            TAG="${VARIANT}-comfy${COMFY_REF_TAG}-torch${TORCH_VER}"
+            echo "Building ${IMG}:${TAG}"
+
+            # Dedicated cache tag PER VARIANT so the two builds never thrash
+            # each other's layer cache, and so :latest is never implicitly
+            # touched (family rule, comfy/CLAUDE.md section 7).
+            CACHE_TAG="buildcache-${VARIANT}"
+            docker pull "${IMG}:${CACHE_TAG}" || true
+
+            # BUILDKIT_INLINE_CACHE=1 embeds layer metadata in the output
+            # image so future --cache-from runs can read it. Build context is
+            # the repo root: base/Dockerfile COPYs torch/<variant>.txt and the
+            # sage wheels from it.
+            docker build \
+              --progress=plain \
+              --cache-from "${IMG}:${CACHE_TAG}" \
+              --build-arg BUILDKIT_INLINE_CACHE=1 \
+              --build-arg CUDA_VARIANT="${VARIANT}" \
+              --build-arg CUDA_BASE_IMAGE="<< parameters.cuda_base_image >>" \
+              -f base/Dockerfile \
+              -t "${IMG}:${TAG}" .
+
+            docker push "${IMG}:${TAG}"
+
+            docker tag "${IMG}:${TAG}" "${IMG}:${CACHE_TAG}"
+            docker push "${IMG}:${CACHE_TAG}"
+
+            # Per-variant success marker for the final notify step.
+            touch "/tmp/build_success_${VARIANT}"
+
+jobs:
+  # Runs on EVERY push (and on tags, as the gate before build_base). Needs no
+  # contexts, so a green run also proves the CircleCI project hookup itself.
+  verify:
+    executor: python
+    steps:
+      - checkout
+      - run:
+          name: Install shellcheck
+          command: |
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq shellcheck
+      - run:
+          name: Shell syntax (bash -n)
+          command: |
+            bash -n src/start.sh
+            find src tools -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
+      - run:
+          name: shellcheck (severity=error)
+          command: |
+            find src tools -name '*.sh' -print0 | xargs -0 -r shellcheck --severity=error
+      - run:
+          name: Python byte-compile
+          command: |
+            find src tools -name '*.py' -print0 | xargs -0 -r python3 -m py_compile
+      - run:
+          name: Stdlib selftests
+          command: |
+            python3 tools/test_download_manager.py
+            python3 tools/test_provisioner.py
+            python3 tools/test_validate_models.py
+      - run:
+          name: JSON parse every .json in the repo
+          command: |
+            find . -path ./.git -prune -o -name '*.json' -print0 | xargs -0 -r -n1 python3 -m json.tool > /dev/null
+      - run:
+          name: onnxruntime CUDA-provider gate present in template Dockerfiles
+          command: |
+            # Guard against the meta-failure of plan section 5c: a template
+            # Dockerfile scaffolded WITHOUT its last-RUN assertion that
+            # CUDAExecutionProvider is in onnxruntime.get_available_providers()
+            # (silent CPU inference). No template consumes this repo yet, so
+            # today this is a deliberate no-op when no template Dockerfile is
+            # present; it becomes real in migration steps 1-4 when template
+            # Dockerfiles reference (or land beside) this runtime. base/Dockerfile
+            # is exempt: the base installs no onnxruntime at all (plan 5c).
+            FOUND=0
+            for df in $(find . -path ./.git -prune -o -name 'Dockerfile' -print | grep -v '^\./base/Dockerfile$'); do
+              FOUND=1
+              if ! grep -q 'CUDAExecutionProvider' "$df"; then
+                echo "FAIL: $df has no CUDAExecutionProvider assertion (onnxruntime gate)"
+                exit 1
+              fi
+              echo "OK: $df carries the CUDAExecutionProvider assertion"
+            done
+            if [ "$FOUND" -eq 0 ]; then
+              echo "No template Dockerfiles in this repo yet; gate is a no-op (see comment)."
+            fi
+
+  # Tag-only. Builds and pushes BOTH base variants; each variant's tag encodes
+  # everything ABI-relevant (cuNNN, ComfyUI ref, torch ver), so tags are
+  # immutable coordinates and :latest never exists for this image.
+  build_base:
+    executor: docker-dind
+    steps:
+      - checkout
+      - run:
+          name: Log in to Docker Hub
+          command: |
+            echo "$DOCKERHUB_PAT" | docker login -u "$DOCKERHUB_USER" --password-stdin
+      - notify-flowbot:
+          message: "A comfyui-base build (both CUDA variants) has started for tag ${CIRCLE_TAG}."
+      - build-base-variant:
+          variant: cu128
+          cuda_base_image: nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+      - build-base-variant:
+          variant: cu130
+          cuda_base_image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04
+      - run:
+          name: Notify FlowBot - build complete
+          when: always
+          command: |
+            if [ -z "$FLOWBOT_WEBHOOK_URL" ] || [ -z "$FLOWBOT_WEBHOOK_TOKEN" ]; then
+              echo "Missing webhook env vars, skipping notification."
+              exit 0
+            fi
+            OK=""
+            FAILED=""
+            for v in cu128 cu130; do
+              if [ -f "/tmp/build_success_${v}" ]; then OK="${OK} ${v}"; else FAILED="${FAILED} ${v}"; fi
+            done
+            if [ -z "$FAILED" ]; then
+              MSG="comfyui-base ${CIRCLE_TAG}: both variants (${OK# }) built and pushed to Docker Hub."
+            else
+              MSG="comfyui-base ${CIRCLE_TAG}: FAILED variants:${FAILED}. Succeeded:${OK:- none}."
+            fi
+            curl -s -X POST "${FLOWBOT_WEBHOOK_URL}/hooks/agent" \
+              -H "Authorization: Bearer ${FLOWBOT_WEBHOOK_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"message\": \"${MSG}\", \"source\": \"circleci\"}"
+
+  # Weekly URL-rot canary. Finding from 2026-08-12: two nvidia/PiD registry
+  # URLs 404 on master in the template family while model-validator reports
+  # success, because URL validation only ever fires on a push (i.e. when the
+  # registry is EDITED), never when the remote rots underneath an untouched
+  # registry. This job exists so the family shape finally has a time-based
+  # trigger. comfyui-runtime itself ships no models_registry.json, so today it
+  # runs the validator's own selftest as a keep-alive; the block below is the
+  # hook templates inherit in migration steps 1-4.
+  scheduled_validation:
+    executor: python
+    steps:
+      - checkout
+      - run:
+          name: Weekly validator run (selftest now, registry when one exists)
+          command: |
+            python3 tools/test_validate_models.py
+            # TEMPLATE HOOK (steps 1-4): when a registry lands in the consuming
+            # repo, this picks it up automatically and starts validating real
+            # URLs against remote rot, weekly, with no push required.
+            REG=""
+            if [ -f src/models_registry.json ]; then REG="src/models_registry.json"; fi
+            if [ -f models_registry.json ]; then REG="models_registry.json"; fi
+            if [ -n "$REG" ]; then
+              # validate_models.py requires --registry and --workflows (both are
+              # mandatory args, so invoking it bare exits 2). --template is
+              # optional but feeds the flag/swap-profile checks when present.
+              TMPL=""
+              if [ -f template.json ]; then TMPL="--template template.json"; fi
+              if [ -f src/template.json ]; then TMPL="--template src/template.json"; fi
+              if [ ! -d workflows ]; then
+                echo "FATAL: ${REG} exists but there is no workflows/ dir to validate against."
+                exit 1
+              fi
+              echo "Registry found at ${REG}, validating URLs."
+              # shellcheck disable=SC2086
+              python3 tools/validate_models.py --registry "$REG" --workflows workflows $TMPL
+            else
+              echo "No models_registry.json in this repo; selftest only (expected for comfyui-runtime)."
+            fi
+
+workflows:
+  version: 2
+
+  verify_and_build:
+    jobs:
+      # verify runs on every branch push AND on tags, so it can gate build_base
+      # (a tag-filtered job's dependencies must themselves run on tags).
+      - verify:
+          filters:
+            tags:
+              only: /.*/
+      - build_base:
+          requires:
+            - verify
+          context:
+            - docker-hub
+            - flowbot-webhook-token
+          filters:
+            tags:
+              only: /^v[0-9]+(\.[0-9]+)*$/ # tags like v5 or v1.2.3, family convention
+            branches:
+              ignore: /.*/
+
+  # Weekly, Mondays 06:00 UTC, main only. NOTE: this is the in-config
+  # scheduled-workflow form. It validates and works on classic project
+  # hookups; if this project is connected via the GitHub App integration,
+  # CircleCI may require the equivalent "scheduled pipeline" created once via
+  # API instead (POST /api/v2/project/:slug/schedule) - verify on first Monday
+  # after the project is created and migrate if it did not fire.
+  weekly_url_validation:
+    triggers:
+      - schedule:
+          cron: "0 6 * * 1"
+          filters:
+            branches:
+              only:
+                - main
+    jobs:
+      - scheduled_validation

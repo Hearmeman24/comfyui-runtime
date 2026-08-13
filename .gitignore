@@ -1,0 +1,4 @@
+src/__pycache__/
+tools/__pycache__/
+*.pyc
+.DS_Store

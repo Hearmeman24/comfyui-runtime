@@ -1,0 +1,14 @@
+# Canonical cu130 torch trio (plan D10). Exactly two consumers: base/Dockerfile
+# and tools/build_sage_wheel.sh (via BUILD_WHEELS.md). Bumping any line here
+# means re-running the wheel runbook before the next base build.
+#
+# Copied verbatim from the one template that already pins the trio:
+# comfyui-minimax/Dockerfile:21-22 (TORCH_PACKAGES="torch==2.11.0
+# torchvision==0.26.0 torchaudio==2.11.0", index cu130). That combo is the one
+# MiniMax-H3 was validated on (torch 2.11.0+cu130, H200, driver 580.159.04,
+# comfyui-minimax/Dockerfile:3-4) and the one the current baked SageAttention
+# cu130 wheel links against.
+--index-url https://download.pytorch.org/whl/cu130
+torch==2.11.0
+torchvision==0.26.0
+torchaudio==2.11.0

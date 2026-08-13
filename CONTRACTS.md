@@ -6,10 +6,10 @@ Six slice agents code against this file. Do not edit it mid-fan-out; a change he
 How to read this file:
 
 - Every claim about how the family behaves today carries a `file:line` citation into the read-only
-  template repos under `/Users/avivkaplan/src/comfy/`.
+  template repos checked out alongside this one.
 - Where the approved plan (`plan.md` v4) deliberately changes current behavior, the change is listed in
   §12 so nobody "fixes" it back.
-- Judgement calls the spec did not settle are marked inline as `> DECISION NEEDED:` for Aviv to scan.
+- Judgement calls the spec did not settle are marked inline as `> DECISION NEEDED:` for the maintainer to scan.
 - No file in any `comfyui-*` template repo is modified by any slice. They are sources to port from.
 
 Repo layout being built (plan.md §2):
@@ -298,7 +298,9 @@ pins, sage on/off").
   "auto_download": [ "rife49.pth" ],     // optional; walk mode: fetched by node packs at runtime
                                          //   (comfyui-wan/src/workflow_provisioner.py:33-39)
   "image_baked": [ "4xLSDIR.pth" ],      // optional; walk mode: baked into the image (wan :42)
-  "extra_model_paths": [ "vae_approx" ], // optional; categories ADDED to the shared base list
+  "extra_model_paths": [ "vae_approx" ], // optional; categories ADDED to the derived list
+                                         //   (2026-08-13 amendment below; native categories
+                                         //   no longer need it)
   "models_symlink": false,               // optional, default false; qwen symlinks models/ too
                                          //   (comfyui-qwen-image/src/start.sh:58; plan §4 keeps it
                                          //   as an option so existing volumes see zero change)
@@ -330,6 +332,24 @@ Template additions today: minimax `vae_approx` (`comfyui-minimax/src/start.sh:14
 photomaker, vae_approx` (`comfyui-qwen-image/src/start.sh:66-84`). `start.sh` MUST `mkdir -p` every
 category it writes into the yaml (`CLAUDE.md` §9: "Generate the yaml from the same list you mkdir").
 Removal of a base category is not supported; an unused extra directory is harmless.
+
+**Amended 2026-08-13** (post-step-0; ltx2 migration spec D5: one robust extra_model_paths
+across all templates, covering every ComfyUI models subdir). The frozen wan
+base list above is superseded: `start.sh` now derives the category list at boot from the pinned
+ComfyUI tree's own `folder_paths.folder_names_and_paths` (`src/model_paths.py`), so the list can
+never again drift from the ComfyUI the image actually runs. Every registered dir under
+`models_dir` is emitted under its canonical key, which carries the legacy alternate dirs along:
+`clip` under `text_encoders`, `unet` under `diffusion_models`, `t2i_adapter` under `controlnet`
+(`t2i_adapter` is NOT in `map_legacy` and must never be a yaml key of its own). `custom_nodes` and
+`datasets` hang off `base_path`, are excluded from the models emission, and `custom_nodes` keeps
+its bespoke base_path-relative yaml line. The derivation runs AFTER the `COMFYUI_VERSION` phase,
+so the categories come from the tree that will actually run. On any derivation failure
+`model_paths.py` prints a frozen v0.32.0 superset (28 dirs) instead and the boot report warns; the
+list is never empty and boot never aborts. The yaml is still written from the SAME list that is
+`mkdir -p`'d, and the `template.json` `extra_model_paths` key above stays accepted and additive
+(node packs that read their own dirs outside `folder_paths`); with every native category derived,
+no template should need it. Enforced by `tools/test_model_paths.py`. The step-0 freeze in this
+file's header was scoped to that fan-out, which is complete.
 
 ### 5a. swap_groups (generalises minimax quant + qwen precision + ltx2's 19b sed)
 

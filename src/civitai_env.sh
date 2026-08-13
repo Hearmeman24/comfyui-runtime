@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # Canonical CivitAI env names, sourced by start.sh before the CivitAI ID
-# downloads. Standardized on qwen's spelling (Aviv, 2026-08-13):
+# downloads. Standardized on qwen's spelling (2026-08-13):
 #
 #     CIVITAI_LORAS        comma-separated LoRA version IDs
 #     CIVITAI_CHECKPOINTS  comma-separated checkpoint version IDs

@@ -2,7 +2,7 @@
 """Self-check for the CivitAI env alias mapping (src/civitai_env.sh).
 
 The canonical customer-facing names are CIVITAI_LORAS and CIVITAI_CHECKPOINTS
-(qwen's spelling, standardized family-wide by Aviv 2026-08-13). Customers have
+(qwen's spelling, standardized family-wide 2026-08-13). Customers have
 the legacy names saved in RunPod template configs and will redeploy with them
 for months, so the runtime must keep accepting them forever (CLAUDE.md:
 never drop an env value customers have saved):

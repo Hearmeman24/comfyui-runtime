@@ -52,11 +52,11 @@ bumps.
    (`exec` / `upload` / `list_pods`). The MCP has **no download tool**; the
    working egress path is `runpodctl send` / `receive` (step 7). Never `ssh`
    or `scp` from Bash. A pasted SSH connection string identifies the pod; it
-   does not authorize shelling out. If the MCP is down, stop and ask Aviv to
+   does not authorize shelling out. If the MCP is down, stop and ask the maintainer to
    restart it.
 2. **Pod lifecycle (create / terminate) goes through the RunPod REST API**
    (`https://rest.runpod.io/v1`, header `Authorization: Bearer $RUNPOD_API_KEY`).
-3. **Every pod creation is a paid action and needs an explicit go from Aviv
+3. **Every pod creation is a paid action and needs an explicit go from the maintainer
    first**, with the cost estimate shown. Approval never carries forward
    between runs.
 4. **The run ends with terminate-and-confirm** (step 10), success or failure.
@@ -105,7 +105,7 @@ the same and the wall clock halves. Steps 2 to 10 repeat per variant.
   against. The trio in that file IS the wheel's ABI contract.
 - Confirm `src/sage_probe.py` exists (it ships with the runtime repo; the
   gate needs it on the pod).
-- Get Aviv's explicit go, showing the pod spec above and the cost estimate.
+- Get the maintainer's explicit go, showing the pod spec above and the cost estimate.
 
 ### 2. Create the pod (RunPod REST API)
 
@@ -237,7 +237,7 @@ Then confirm with `runpod-ssh list_pods` that the pod is GONE from the
 listing. Do not end the session between create and this confirmation. If
 the listing still shows it, keep terminating until it is gone and say so.
 
-### 11. Publish the Release (outward-facing: explicit go from Aviv first)
+### 11. Publish the Release (outward-facing: explicit go from the maintainer first)
 
 One Release per variant on `Hearmeman24/comfyui-runtime`:
 

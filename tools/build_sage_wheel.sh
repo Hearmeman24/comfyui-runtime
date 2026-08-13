@@ -44,6 +44,8 @@ WORK_DIR=${WORK_DIR:-/tmp/sage_build}
 
 [ -f "$TRIO_FILE" ] || die "torch trio file not found: $TRIO_FILE (upload torch/$VARIANT.txt beside this script)"
 [ -f "$PROBE" ] || die "sage_probe.py not found: $PROBE (upload src/sage_probe.py beside this script)"
+GENCODE_PATCH=${GENCODE_PATCH:-$SCRIPT_DIR/sage_per_ext_gencode.patch}
+[ -f "$GENCODE_PATCH" ] || die "sage_per_ext_gencode.patch not found: $GENCODE_PATCH (upload tools/sage_per_ext_gencode.patch beside this script)"
 command -v cuobjdump >/dev/null 2>&1 || die "cuobjdump not on PATH (the pod image must be a CUDA -devel base)"
 command -v nvcc >/dev/null 2>&1 || die "nvcc not on PATH (the pod image must be a CUDA -devel base)"
 
@@ -51,11 +53,30 @@ command -v nvcc >/dev/null 2>&1 || die "nvcc not on PATH (the pod image must be 
 # old 68de379 pin, setup.py ignores TORCH_CUDA_ARCH_LIST entirely and an H200
 # build yields an sm90-only wheel. 8.6 is deliberately absent from the arch
 # list: sm86 routes to the triton JIT path and never touches a cubin
-# (upstream core.py:146-147); 12.1 is present because core.py:154-155
+# (upstream core.py:146-147); 12.1 is present on cu130 because core.py:154-155
 # dispatches sm121.
 export SAGE_COMMIT=d1a57a546
 SAGE_REPO=https://github.com/thu-ml/SageAttention.git
-export TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 12.0 12.1"
+# SEMICOLONS ARE LOAD-BEARING. SageAttention's setup.py parses this with
+# arch_list_env.replace(",", ";").split(";") and never splits on whitespace
+# (upstream setup.py:96 at d1a57a546). A space-separated list therefore
+# arrives as ONE item, only capability.startswith("8.0") matches, and the
+# build silently produces an sm80-only wheel that passes every import check.
+# Verified the hard way on an H200, 2026-08-13: the space-separated form
+# built _qattn_sm80 alone and the cuobjdump gate caught it.
+#
+# THE ARCH LIST IS PER VARIANT (approved 2026-08-13, amends plan decision #8).
+# Do not "helpfully" re-add 12.1 to cu128: nvcc 12.8 rejects it outright
+# ("nvcc fatal   : Unsupported gpu architecture 'compute_121a'", verified on
+# an H200 2026-08-13 - it killed every extension before compiling anything).
+# sm121 support landed in CUDA 12.9, so each variant's wheel carries exactly
+# what its own nvcc can emit: only cu130 covers sm121. There is no cu128
+# workaround: sm_120a cubins are arch-specific and do not run on sm121, and
+# the 'f' family suffix needs 12.9+ too.
+case "$VARIANT" in
+    cu128) export TORCH_CUDA_ARCH_LIST="8.0;8.9;9.0;12.0" ;;
+    cu130) export TORCH_CUDA_ARCH_LIST="8.0;8.9;9.0;12.0;12.1" ;;
+esac
 export EXT_PARALLEL=4
 export NVCC_APPEND_FLAGS="--threads 8"
 export MAX_JOBS=32
@@ -121,6 +142,14 @@ mkdir -p "$WORK_DIR"
 
 git clone "$SAGE_REPO" "$SRC_DIR"
 git -C "$SRC_DIR" reset --hard "$SAGE_COMMIT"
+# Per-extension gencode (the documented fallback, BUILD_WHEELS.md "Known
+# risk", proven needed 2026-08-13): upstream shares one -gencode set across
+# all extensions, and the Hopper-only sm90 source (wgmma/TMA) dies in ptxas
+# when force-compiled for sm_89/sm_120/sm_121 ("Instruction 'wgmma.mma_async
+# ...' not supported on .target 'sm_89'"). The patch gives each extension
+# only the arches its sources support. Not a fork: applied fresh on every
+# build after the reset --hard above.
+git -C "$SRC_DIR" apply "$GENCODE_PATCH"
 
 # --no-build-isolation so the extension links against this venv's torch
 # (comfyui-minimax/src/sage_build.sh:84-87).
@@ -152,7 +181,18 @@ assert_archs() {
 }
 
 assert_archs _qattn_sm80 sm_80
-assert_archs _qattn_sm89 sm_89 sm_120 sm_121
+# The sm89 module's expected cubin set is per variant: cu128 cannot carry
+# sm_121a (nvcc 12.8 cannot emit it; see the arch list comment above).
+# The Blackwell cubins are the arch-SPECIFIC variants: setup.py maps 12.0 ->
+# num="120a" and 12.1 -> num="121a" (code=sm_120a / sm_121a), so cuobjdump
+# reports sm_120a / sm_121a. Plain sm_120 / sm_121 never appear in any
+# upstream build - asserting them was a gate-spec bug (caught 2026-08-13
+# when both otherwise-good wheels failed it).
+if [ "$VARIANT" = cu128 ]; then
+    assert_archs _qattn_sm89 sm_89 sm_120a
+else
+    assert_archs _qattn_sm89 sm_89 sm_120a sm_121a
+fi
 assert_archs _qattn_sm90 sm_90a
 
 # ---- Gate 2: real kernel launch on this H200 (plan.md section 5, step 3b) --

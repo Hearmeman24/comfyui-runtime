@@ -350,8 +350,23 @@ def provision(args, env) -> int:
     if mode == "registry":
         # Registry gating decides downloads; the scan below is informational
         # only, producing user-supplied warnings (CONTRACTS.md section 3).
+        # The fp8/full download choice must resolve the env var exactly as
+        # the workflow rewrite did, or the manifest pulls one variant while
+        # the widgets load the other. When a swap group shares the variant
+        # env, resolve_profile_key is the single source of truth; without
+        # one there is no rewrite side, so a normalized compare suffices.
         variant_env = template.get("variant_env")
-        lightweight_fp8 = bool(variant_env) and env.get(variant_env) == "true"
+        # Guard on variant_env being set before matching: with it absent, a
+        # group that is itself missing "env" would match None == None and
+        # resolve_profile_key would KeyError, failing the whole provision on
+        # a schema-invalid template that used to boot.
+        group = next((g for g in template.get("swap_groups", [])
+                      if variant_env and g.get("env") == variant_env), None)
+        if group is not None:
+            lightweight_fp8 = resolve_profile_key(group, env) == "true"
+        else:
+            lightweight_fp8 = bool(variant_env) and (
+                env.get(variant_env) or "").strip().lower() == "true"
         queued = dict(select(registry, env, lightweight_fp8))
     else:
         # Swap-group queue rule: the selected profiles are pulled regardless

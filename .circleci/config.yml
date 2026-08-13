@@ -156,6 +156,7 @@ jobs:
             python3 tools/test_provisioner.py
             python3 tools/test_validate_models.py
             python3 tools/test_boot_report.py
+            python3 tools/test_civitai_env.py
       - run:
           name: JSON parse every .json in the repo
           command: |

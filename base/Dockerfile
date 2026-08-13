@@ -146,21 +146,17 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # torch.version.cuda major (plan D9). The two wheels share a filename, so they
 # live in separate Release tags and separate /opt/sage/<variant>/ dirs.
 #
-# !!! PLACEHOLDERS - THE RELEASE DOES NOT EXIST YET !!!
-# These two ADDs are guaranteed to fail until a human replaces them:
-#   - the URLs contain FIXME- in the tag path, so they cannot resolve, and
-#   - the all-zero sha256 cannot match any real file even if a URL resolved.
-# Fill BOTH the URL and the checksum per variant from the published Release,
-# following tools/BUILD_WHEELS.md step 11. Expected tag grammar:
-#   sage-d1a57a5-cu128-torch2.11.0 / sage-d1a57a5-cu130-torch2.11.0
-# and the real wheel filename may differ from the one guessed below - take it
-# verbatim from the Release asset.
+# URLs and checksums are verbatim from the published Releases (2026-08-13,
+# tools/BUILD_WHEELS.md step 12): cu128 is 35,816,068 bytes, cu130 is
+# 41,362,181 bytes. These Releases are production infrastructure - never
+# delete or retag them. A trio bump means re-running BUILD_WHEELS.md and
+# updating both ADDs together.
 # ----------------------------------------------------------------------------
-ADD --checksum=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-    https://github.com/Hearmeman24/comfyui-runtime/releases/download/FIXME-sage-d1a57a5-cu128-torch2.11.0/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl \
+ADD --checksum=sha256:487aeccc76236043c06154dfac34626692af25f520a3634c71d0bf160ab27ed6 \
+    https://github.com/Hearmeman24/comfyui-runtime/releases/download/sage-d1a57a5-cu128-torch2.11.0/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl \
     /opt/sage/cu128/
-ADD --checksum=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-    https://github.com/Hearmeman24/comfyui-runtime/releases/download/FIXME-sage-d1a57a5-cu130-torch2.11.0/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl \
+ADD --checksum=sha256:77803563ccc1f3a29e52b7873c058a665aa9de4ca0827c9c8c507d07e25f64a1 \
+    https://github.com/Hearmeman24/comfyui-runtime/releases/download/sage-d1a57a5-cu130-torch2.11.0/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl \
     /opt/sage/cu130/
 
 # Variant-matched build-time sanity check (donor: comfyui-wan/Dockerfile:165-169,

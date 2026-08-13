@@ -156,6 +156,21 @@ def check_registry_schema(registry: dict) -> list[str]:
     return errors
 
 
+def _looks_like_a_filename(val: str) -> bool:
+    """A widget value that merely ENDS in a model extension is not necessarily a
+    model reference. A MarkdownNote whose prose closes with a download link ends
+    in ".safetensors" too, and the coverage check then derives a "folder prefix"
+    from a paragraph and errors on it (a real wan workflow does exactly this).
+
+    Two things a filename is never: multi-line, or a URL. Reject on those.
+
+    Deliberately NOT rejecting on whitespace generally: ComfyUI filenames may
+    contain spaces, and skipping those would turn a loud false positive into a
+    silent false negative, which is the worse failure.
+    """
+    return "\n" not in val and "\r" not in val and "://" not in val
+
+
 def _iter_strings(value):
     if isinstance(value, str):
         yield value
@@ -181,7 +196,7 @@ def workflow_widget_refs(doc: dict) -> set[str]:
             if not isinstance(node, dict):
                 continue
             for val in _iter_strings(node.get("widgets_values") or []):
-                if val.lower().endswith(MODEL_EXTS):
+                if val.lower().endswith(MODEL_EXTS) and _looks_like_a_filename(val):
                     refs.add(val)
     return refs
 

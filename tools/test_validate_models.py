@@ -317,6 +317,48 @@ def test_offline_and_exit_codes():
         check(rc == 1, "e2e: a missing workflows dir exits 1 through main()")
 
 
+def test_prose_is_not_a_filename():
+    """A note whose text merely ENDS in a model URL is not a model reference.
+
+    A real wan workflow ships a note closing with a download link, so the whole
+    multi-line blob ended in ".safetensors", the coverage check derived a folder
+    prefix from a paragraph, and it errored, blocking the build. Filenames
+    containing SPACES must still be checked: skipping those would swap a loud
+    false positive for a silent false negative.
+    """
+    prose = ("Download models:\n\nvae:\n"
+             "https://huggingface.co/org/repo/resolve/main/foo_vae.safetensors")
+    bare_url = "https://huggingface.co/org/repo/resolve/main/foo_vae.safetensors"
+    reg = {
+        "foo_vae.safetensors": hf_entry("foo_vae.safetensors", "vae"),
+        "my favourite lora.safetensors": hf_entry("my favourite lora.safetensors", "loras"),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        wdir = make_workflows(tmp, {
+            "Note.json": wf(top=[prose]),
+            "Url.json": wf(top=[bare_url]),
+            "Spaced.json": wf(top=["my favourite lora.safetensors"]),
+            "SpacedStray.json": wf(top=["vae/my favourite lora.safetensors"]),
+            "Stray.json": wf(top=["vae/foo_vae.safetensors"]),
+        })
+        errors, warnings = vm.check_coverage(reg, wdir)
+
+    check(not any("Note.json" in e for e in errors),
+          "prose ending in a model URL must not be read as a filename")
+    check(not any("Url.json" in e for e in errors),
+          "a bare model URL must not be read as a filename")
+    check(not any("Note.json" in w or "Url.json" in w for w in warnings),
+          "skipped prose must not resurface as a user-supplied warning")
+    check(not any("Spaced.json" in e for e in errors),
+          "a filename containing spaces resolves cleanly against its registry entry")
+    check(any("SpacedStray.json" in e for e in errors),
+          "a spaced filename with a wrong prefix must still ERROR, which is the only "
+          "observable proof it was COLLECTED rather than silently skipped")
+    check(any("Stray.json" in e for e in errors),
+          "a genuinely wrong folder prefix must still be a hard error")
+    print("ok: prose and URLs skipped; spaced filenames still checked")
+
+
 def main() -> int:
     tests = [
         test_subgraph_walk,
@@ -331,6 +373,7 @@ def main() -> int:
         test_template_checks,
         test_allowlists_suppress_warnings,
         test_offline_and_exit_codes,
+        test_prose_is_not_a_filename,
     ]
     for t in tests:
         t()

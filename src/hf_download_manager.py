@@ -39,6 +39,8 @@ from huggingface_hub import HfFileSystem, hf_hub_download  # noqa: E402
 # 3, never more: RunPod's network volume caps around 150 MB/s aggregate, so
 # extra streams only split the same bandwidth.
 POOL_SIZE = 3
+# Serializes the stage->volume handoff; see run_job.
+HANDOFF_LOCK = threading.Lock()
 SNAPSHOT_INTERVAL = 10  # seconds
 STALL_SECS = 300        # abandon if no global byte progress for this long
 DEADLINE_SECS = 3600    # absolute backstop for the whole download phase
@@ -82,6 +84,11 @@ class Job:
     filename: str = ""
     total_bytes: int = 0
     status: str = "queued"  # queued | active | done | failed
+    # download: bytes are landing in the stage dir.
+    # handoff:  the download is finished and the file is being copied from the
+    #           stage to the volume. stage_bytes stops moving here, which is
+    #           why progress_bytes exists (see below).
+    phase: str = "download"  # download | handoff
     start_ts: float = 0.0
     end_ts: float = 0.0
     stage_dir: Optional[Path] = None
@@ -186,6 +193,32 @@ def stage_bytes(job: Job) -> int:
     return total
 
 
+def partial_path(job: Job) -> Path:
+    return job.dest.with_name(job.dest.name + ".partial")
+
+
+def moved_bytes(job: Job) -> int:
+    """Bytes already copied onto the volume during the handoff."""
+    try:
+        return partial_path(job).stat().st_size
+    except OSError:
+        return 0
+
+
+def progress_bytes(job: Job) -> int:
+    """Bytes this job has moved, whichever phase it is in.
+
+    stage_bytes alone is not progress: once the download returns, the source
+    sits in the stage at full size and does not change for the whole
+    stage->volume copy. A 25 GB file over RunPod's ~150 MB/s volume is nearly
+    3 minutes of that, and three at once exceeded STALL_SECS on a real pod
+    (2026-08-13), so the watchdog killed copies that were working fine.
+    Summing both is monotonic across the phase change: the stage holds steady
+    while the .partial grows.
+    """
+    return stage_bytes(job) + moved_bytes(job)
+
+
 def pick_stage_dir(job: Job) -> Path:
     """Local disk when it has room for this file, else beside the destination.
 
@@ -285,9 +318,18 @@ def run_job(job: Job, lock: threading.Lock) -> None:
             # Land on a .partial name first and rename within the volume, which
             # IS atomic: a half-copied model must never appear at the path a
             # workflow loads from.
-            tmp = job.dest.with_name(job.dest.name + ".partial")
-            shutil.move(str(src), str(tmp))
-            os.replace(tmp, job.dest)
+            #
+            # One handoff at a time. The volume caps around 150 MB/s no matter
+            # how many writers, so three concurrent 20 GB copies just split it
+            # three ways and each takes three times as long. Waiting here is
+            # safe for the watchdog: its progress metric is global, and the
+            # holder of the lock is moving bytes the whole time.
+            tmp = partial_path(job)
+            with HANDOFF_LOCK:
+                with lock:
+                    job.phase = "handoff"
+                shutil.move(str(src), str(tmp))
+                os.replace(tmp, job.dest)
         shutil.rmtree(stage, ignore_errors=True)
 
         if not job.dest.is_file() or job.dest.stat().st_size < floor_bytes(job):
@@ -321,18 +363,24 @@ def snapshot(jobs: list[Job], started_at: float, lock: threading.Lock,
     if active:
         lines.append("ACTIVE")
         for j in active:
-            cur = stage_bytes(j)
+            # In the handoff phase report the copy, not the finished download:
+            # a frozen 100% at 0.0 B/s reads as a hang when the job is fine.
+            handoff = j.phase == "handoff"
+            cur = moved_bytes(j) if handoff else stage_bytes(j)
             pct = (cur / j.total_bytes * 100) if j.total_bytes else 0.0
             prev_t, prev_b = prev_bytes.get(id(j), (j.start_ts, 0))
+            if handoff and prev_b > cur:
+                prev_b = 0  # phase change resets the byte baseline
             dt = max(now - prev_t, 0.001)
             speed = max(cur - prev_b, 0) / dt
             eta = (j.total_bytes - cur) / speed if speed > 0 and j.total_bytes else 0
-            prev_bytes[id(j)] = (now, cur)
+            label = "handoff -> volume" if handoff else "downloading"
             lines.append(
-                f"  {j.dest.name:<60} {pct:5.1f}%  "
+                f"  {j.dest.name:<60} {label:<18} {pct:5.1f}%  "
                 f"{fmt_bytes(cur):>9}/{fmt_bytes(j.total_bytes):<9}  "
                 f"{fmt_bytes(speed)}/s  ETA {fmt_dur(eta)}"
             )
+            prev_bytes[id(j)] = (now, cur)
     if queued:
         names = ", ".join(j.dest.name for j in queued[:8])
         more = "" if len(queued) <= 8 else f", +{len(queued) - 8} more"
@@ -361,9 +409,15 @@ def main() -> int:
 
     # A pod killed mid-move leaves <name>.partial behind. It is not loadable
     # and not what any size check looks at, so it would sit there forever.
-    for j in jobs:
-        stale = j.dest.with_name(j.dest.name + ".partial")
-        if stale.exists():
+    # Sweep the whole destination directory, not just this manifest's names:
+    # a model that has since been flag-disabled or renamed in the registry
+    # never appears in `jobs` again, so a per-entry sweep can never reclaim it
+    # (customer report, 2026-08-13). Only ever *.partial, only in directories
+    # this manifest writes to.
+    for stale_dir in {j.dest.parent for j in jobs}:
+        if not stale_dir.is_dir():
+            continue
+        for stale in stale_dir.glob("*.partial"):
             print(f"[hf-manager] removing stale {stale.name}", flush=True)
             stale.unlink(missing_ok=True)
     shutil.rmtree(LOCAL_STAGE, ignore_errors=True)
@@ -408,7 +462,21 @@ def main() -> int:
             now = time.time()
             with lock:
                 finished = sum(1 for j in jobs if j.status in ("done", "failed"))
-                active_bytes = sum(stage_bytes(j) for j in jobs if j.status == "active")
+                # progress_bytes, not stage_bytes: a job copying to the volume
+                # is working. Landed bytes are added so the total only ever
+                # rises; without them a finished job's stage going to zero
+                # would leave a high-water mark the next job has to climb back
+                # to before anything counts as progress.
+                active_bytes = sum(progress_bytes(j) for j in jobs
+                                   if j.status == "active")
+                landed = 0
+                for j in jobs:
+                    if j.status == "done":
+                        try:
+                            landed += j.dest.stat().st_size
+                        except OSError:
+                            pass
+                active_bytes += landed
             if finished > last_finished or active_bytes > last_active_bytes:
                 last_finished, last_active_bytes, last_progress_at = finished, active_bytes, now
 

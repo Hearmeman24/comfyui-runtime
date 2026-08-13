@@ -429,12 +429,110 @@ def test_watchdog_deadline(tmp):
     print("ok: deadline watchdog abandons a progressing-but-overdue phase and exits 1")
 
 
+def test_handoff_counts_as_progress(tmp):
+    """A slow stage->volume handoff must not read as a stall.
+
+    The real failure this reproduces (minimax pod, 2026-08-13): three 20 GB
+    models finished downloading, then spent >5 min in shutil.move to the
+    network volume. stage_bytes stops changing the moment the download
+    returns, so the watchdog saw zero progress and os._exit(1)'d mid-copy,
+    losing 64 GB and stranding the queued taeh3 behind the held pool slots.
+
+    Here the move takes ~8x STALL_SECS while the .partial grows steadily.
+    Before the fix the watchdog fires; after it, the copy is progress.
+    """
+    reset_calls()
+    dm.LOCAL_STAGE = tmp / "hf_stage"
+    dm.STALL_SECS = 0.3
+    HF_BEHAVIOR["size_bytes"] = 64 * 1024
+    dest = tmp / "models" / "diffusion_models" / "slow.safetensors"
+    man = tmp / "m.tsv"
+    man.write_text(f"{HF_URL}\t{dest}\t0.01\n")
+
+    real_move = shutil.move
+
+    def slow_move(src, dst):
+        """Copy in 8 chunks over ~2.4s, growing dst the way a real cross-FS
+        move does. Only the manifest's own file is slowed."""
+        data = Path(src).read_bytes()
+        step = max(len(data) // 8, 1)
+        with open(dst, "wb") as fh:
+            for off in range(0, len(data), step):
+                fh.write(data[off:off + step])
+                fh.flush()
+                os.fsync(fh.fileno())
+                time.sleep(0.3)
+        Path(src).unlink()
+
+    dm.shutil.move = slow_move
+
+    def fake_exit(code):
+        raise WatchdogExit(code)
+
+    real_exit = os._exit
+    os._exit = fake_exit
+    try:
+        rc, out = run_main(man)
+    except WatchdogExit as e:
+        raise AssertionError(
+            f"watchdog fired (exit {e.args[0]}) during an active handoff; "
+            "the copy was making progress on the volume") from None
+    finally:
+        os._exit = real_exit
+        dm.shutil.move = real_move
+        dm.STALL_SECS = 300
+
+    assert rc == 0, f"expected 0, got {rc}\n{out}"
+    assert dest.is_file() and dest.stat().st_size == 64 * 1024, \
+        f"handoff did not land the file\n{out}"
+    assert not dest.with_name(dest.name + ".partial").exists(), \
+        "handoff left a .partial behind"
+    assert "handoff" in out, \
+        f"the snapshot must name the handoff phase, not show a frozen 100%:\n{out}"
+    print("ok: a slow stage->volume handoff counts as progress and is labelled")
+
+
+def test_orphan_partial_sweep(tmp):
+    """A .partial whose model is no longer in the manifest must still go.
+
+    Customer report 2026-08-13: leftovers on the volume. The old sweep only
+    looked up <dest>.partial for entries in THIS manifest, so a model since
+    flag-disabled or renamed in the registry could never be reclaimed.
+    """
+    reset_calls()
+    dm.LOCAL_STAGE = tmp / "hf_stage"
+    HF_BEHAVIOR["size_bytes"] = 32 * 1024
+    models = tmp / "models" / "diffusion_models"
+    models.mkdir(parents=True)
+    dest = models / "hfmodel.safetensors"
+
+    orphan = models / "some_disabled_model.safetensors.partial"
+    orphan.write_bytes(b"\0" * 4096)
+    own = dest.with_name(dest.name + ".partial")
+    own.write_bytes(b"\0" * 4096)
+    keeper = models / "unrelated.safetensors"
+    keeper.write_bytes(b"\0" * 4096)
+
+    man = tmp / "m.tsv"
+    man.write_text(f"{HF_URL}\t{dest}\t0.01\n")
+    rc, out = run_main(man)
+
+    assert rc == 0, f"expected 0, got {rc}\n{out}"
+    assert not orphan.exists(), \
+        "a .partial outside the manifest survived the sweep"
+    assert not own.exists(), "the manifest's own .partial survived"
+    assert keeper.is_file(), \
+        "the sweep deleted a real model; it must only ever remove *.partial"
+    print("ok: orphan .partial files are swept, real files are not")
+
+
 def main() -> int:
     test_env_timeouts()
     for test in (test_parse_manifest, test_exit_codes, test_happy_path,
                  test_skip_and_refetch, test_floor_failure,
                  test_stage_fallback, test_status_file, test_watchdog,
-                 test_watchdog_deadline):
+                 test_watchdog_deadline, test_handoff_counts_as_progress,
+                 test_orphan_partial_sweep):
         with tempfile.TemporaryDirectory() as tmp:
             test(Path(tmp))
     print("all download manager self-tests passed")

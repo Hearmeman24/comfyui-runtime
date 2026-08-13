@@ -150,14 +150,22 @@ jobs:
           command: |
             find src tools -name '*.py' -print0 | xargs -0 -r python3 -m py_compile
       - run:
+          # Globbed, not listed: tools/test_volume_sync.py was added and CI
+          # went green without ever running it, because the list was by hand.
+          # A new suite must be picked up by existing, or it is not a gate.
           name: Stdlib selftests
           command: |
-            python3 tools/test_download_manager.py
-            python3 tools/test_provisioner.py
-            python3 tools/test_validate_models.py
-            python3 tools/test_boot_report.py
-            python3 tools/test_civitai_env.py
-            python3 tools/test_model_paths.py
+            shopt -s nullglob
+            found=(tools/test_*.py)
+            if [ ${#found[@]} -eq 0 ]; then
+              echo "no tools/test_*.py found; the suite has vanished"
+              exit 1
+            fi
+            echo "running ${#found[@]} suites: ${found[*]}"
+            for t in "${found[@]}"; do
+              echo "--- $t"
+              python3 "$t"
+            done
       - run:
           name: JSON parse every .json in the repo
           command: |

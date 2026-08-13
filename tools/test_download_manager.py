@@ -209,11 +209,15 @@ def test_happy_path(tmp):
     gdown = [c for c in SUB_CALLS if c[0] == "gdown"]
     assert len(gdown) == 1 and "-O" in gdown[0]
 
-    leftovers = [p for p in dm.LOCAL_STAGE.rglob("*") if p.is_file()] \
-        if dm.LOCAL_STAGE.exists() else []
-    assert not leftovers, f"staging not cleaned: {leftovers}"
+    # NVMe-first: the stage is NOT cleaned here. The staged file IS the model
+    # until volume_sync.py copies it across and unlinks it. Every dest is a
+    # symlink into the stage at this point.
+    for name, dest in dests.items():
+        assert dest.is_symlink(), f"{name} dest must be a symlink into the stage"
+        assert Path(os.readlink(dest)).is_file(), \
+            f"{name} symlink target must still exist in the stage"
     del os.environ["HF_TOKEN"]
-    print("ok: happy path (hf + aria2c + gdown), atomic handoff, staging cleaned")
+    print("ok: happy path (hf + aria2c + gdown), atomic symlink publish")
 
 
 def test_skip_and_refetch(tmp):
@@ -429,69 +433,6 @@ def test_watchdog_deadline(tmp):
     print("ok: deadline watchdog abandons a progressing-but-overdue phase and exits 1")
 
 
-def test_handoff_counts_as_progress(tmp):
-    """A slow stage->volume handoff must not read as a stall.
-
-    The real failure this reproduces (minimax pod, 2026-08-13): three 20 GB
-    models finished downloading, then spent >5 min in shutil.move to the
-    network volume. stage_bytes stops changing the moment the download
-    returns, so the watchdog saw zero progress and os._exit(1)'d mid-copy,
-    losing 64 GB and stranding the queued taeh3 behind the held pool slots.
-
-    Here the move takes ~8x STALL_SECS while the .partial grows steadily.
-    Before the fix the watchdog fires; after it, the copy is progress.
-    """
-    reset_calls()
-    dm.LOCAL_STAGE = tmp / "hf_stage"
-    dm.STALL_SECS = 0.3
-    HF_BEHAVIOR["size_bytes"] = 64 * 1024
-    dest = tmp / "models" / "diffusion_models" / "slow.safetensors"
-    man = tmp / "m.tsv"
-    man.write_text(f"{HF_URL}\t{dest}\t0.01\n")
-
-    real_move = shutil.move
-
-    def slow_move(src, dst):
-        """Copy in 8 chunks over ~2.4s, growing dst the way a real cross-FS
-        move does. Only the manifest's own file is slowed."""
-        data = Path(src).read_bytes()
-        step = max(len(data) // 8, 1)
-        with open(dst, "wb") as fh:
-            for off in range(0, len(data), step):
-                fh.write(data[off:off + step])
-                fh.flush()
-                os.fsync(fh.fileno())
-                time.sleep(0.3)
-        Path(src).unlink()
-
-    dm.shutil.move = slow_move
-
-    def fake_exit(code):
-        raise WatchdogExit(code)
-
-    real_exit = os._exit
-    os._exit = fake_exit
-    try:
-        rc, out = run_main(man)
-    except WatchdogExit as e:
-        raise AssertionError(
-            f"watchdog fired (exit {e.args[0]}) during an active handoff; "
-            "the copy was making progress on the volume") from None
-    finally:
-        os._exit = real_exit
-        dm.shutil.move = real_move
-        dm.STALL_SECS = 300
-
-    assert rc == 0, f"expected 0, got {rc}\n{out}"
-    assert dest.is_file() and dest.stat().st_size == 64 * 1024, \
-        f"handoff did not land the file\n{out}"
-    assert not dest.with_name(dest.name + ".partial").exists(), \
-        "handoff left a .partial behind"
-    assert "handoff" in out, \
-        f"the snapshot must name the handoff phase, not show a frozen 100%:\n{out}"
-    print("ok: a slow stage->volume handoff counts as progress and is labelled")
-
-
 def test_orphan_partial_sweep(tmp):
     """A .partial whose model is no longer in the manifest must still go.
 
@@ -526,13 +467,126 @@ def test_orphan_partial_sweep(tmp):
     print("ok: orphan .partial files are swept, real files are not")
 
 
+def test_symlink_handoff(tmp):
+    """The manager leaves a symlink into the stage, not a copy on the volume.
+
+    This is the whole point of NVMe-first provisioning: the boot must not wait
+    for bytes to cross the network volume. Verified the way ComfyUI resolves a
+    model, i.e. through os.path.isfile, which follows the link.
+    """
+    reset_calls()
+    dm.LOCAL_STAGE = tmp / "hf_stage"
+    HF_BEHAVIOR["size_bytes"] = 64 * 1024
+    dest = tmp / "models" / "diffusion_models" / "hfmodel.safetensors"
+    man = tmp / "m.tsv"
+    man.write_text(f"{HF_URL}\t{dest}\t0.01\n")
+
+    rc, out = run_main(man)
+    assert rc == 0, f"expected 0, got {rc}\n{out}"
+    assert dest.is_symlink(), f"dest must be a symlink, not a copy\n{out}"
+    target = Path(os.readlink(dest))
+    assert dm.LOCAL_STAGE in target.parents, \
+        f"symlink must point into the stage, points at {target}"
+    assert os.path.isfile(dest), "os.path.isfile must follow it (folder_paths.py:453)"
+    assert dest.stat().st_size == 64 * 1024, "stat must follow the link to the real size"
+    assert target.is_file(), "the staged file must survive; volume_sync consumes it"
+    assert not dest.with_name(dest.name + ".partial").exists()
+    print("ok: the manager hands off a symlink into the stage, not a volume copy")
+
+
+def test_existing_state_table(tmp):
+    """Every row of spec section 2b, in one pass.
+
+    Row 3 (live symlink) is the one the pre-2026-08-13 code could not express:
+    is_file() follows a symlink, so it skipped the download and then never
+    copied, leaving the pod depending on a stage dir the next restart wipes.
+    """
+    reset_calls()
+    dm.LOCAL_STAGE = tmp / "hf_stage"
+    dm.LOCAL_STAGE.mkdir(parents=True, exist_ok=True)
+    HF_BEHAVIOR["size_bytes"] = 64 * 1024
+    models = tmp / "models" / "diffusion_models"
+    models.mkdir(parents=True)
+
+    landed = models / "landed.safetensors"          # row 1: real file, big enough
+    landed.write_bytes(b"\0" * 64 * 1024)
+    small = models / "small.safetensors"            # row 2: real file, sub-floor
+    small.write_bytes(b"\0" * 128)
+    live = models / "live.safetensors"              # row 3: symlink, target alive
+    live_target = dm.LOCAL_STAGE / "live.safetensors"
+    live_target.write_bytes(b"\0" * 64 * 1024)
+    live.symlink_to(live_target)
+    dead = models / "dead.safetensors"              # row 4: symlink, target gone
+    dead.symlink_to(dm.LOCAL_STAGE / "vanished.safetensors")
+    absent = models / "absent.safetensors"          # row 5
+
+    man = tmp / "m.tsv"
+    man.write_text("".join(
+        f"https://huggingface.co/org/repo/resolve/main/{p.name}\t{p}\t0.01\n"
+        for p in (landed, small, live, dead, absent)))
+    downloaded_before = len(HF_CALLS)
+    rc, out = run_main(man)
+    assert rc == 0, f"expected 0, got {rc}\n{out}"
+
+    fetched = {c["filename"] for c in HF_CALLS[downloaded_before:]}
+    assert "landed.safetensors" not in fetched, "row 1: a landed file must not refetch"
+    assert "small.safetensors" in fetched, "row 2: a sub-floor file must refetch"
+    assert "live.safetensors" not in fetched, \
+        "row 3: a symlink with a live target must NOT refetch"
+    assert "dead.safetensors" in fetched, "row 4: a dangling symlink must refetch"
+    assert "absent.safetensors" in fetched, "row 5: a missing file must download"
+
+    assert not landed.is_symlink() and landed.is_file(), "row 1 must stay a real file"
+    assert live.is_symlink() and live.exists(), "row 3's symlink must survive intact"
+    assert os.readlink(live) == str(live_target), "row 3 must still point at its target"
+    assert dead.is_symlink() and dead.exists(), \
+        "row 4 must end as a fresh, resolvable symlink"
+    print("ok: all five rows of the existing-state table behave as specified")
+
+
+def test_dangling_symlink_sweep(tmp):
+    """A dangling symlink for a model NOT in this manifest is still removed.
+
+    ComfyUI lists it via os.walk(followlinks=True) and then logs
+    "doesn't link anywhere" on every load attempt. It is dropdown litter.
+    """
+    reset_calls()
+    dm.LOCAL_STAGE = tmp / "hf_stage"
+    HF_BEHAVIOR["size_bytes"] = 32 * 1024
+    models = tmp / "models" / "diffusion_models"
+    models.mkdir(parents=True)
+    dest = models / "hfmodel.safetensors"
+
+    orphan = models / "disabled_model.safetensors"
+    orphan.symlink_to(tmp / "hf_stage" / "gone.safetensors")
+    real = models / "real.safetensors"
+    real.write_bytes(b"\0" * 4096)
+    good_target = tmp / "elsewhere.safetensors"
+    good_target.write_bytes(b"\0" * 4096)
+    good_link = models / "good.safetensors"
+    good_link.symlink_to(good_target)
+
+    man = tmp / "m.tsv"
+    man.write_text(f"{HF_URL}\t{dest}\t0.01\n")
+    rc, out = run_main(man)
+
+    assert rc == 0, f"expected 0, got {rc}\n{out}"
+    assert not orphan.is_symlink() and not orphan.exists(), \
+        "a dangling symlink outside the manifest must be swept"
+    assert real.is_file(), "the sweep must not touch real files"
+    assert good_link.is_symlink() and good_link.exists(), \
+        "the sweep must not touch symlinks that resolve"
+    print("ok: dangling symlinks are swept, live links and real files are not")
+
+
 def main() -> int:
     test_env_timeouts()
     for test in (test_parse_manifest, test_exit_codes, test_happy_path,
                  test_skip_and_refetch, test_floor_failure,
                  test_stage_fallback, test_status_file, test_watchdog,
-                 test_watchdog_deadline, test_handoff_counts_as_progress,
-                 test_orphan_partial_sweep):
+                 test_watchdog_deadline, test_orphan_partial_sweep,
+                 test_symlink_handoff, test_existing_state_table,
+                 test_dangling_symlink_sweep):
         with tempfile.TemporaryDirectory() as tmp:
             test(Path(tmp))
     print("all download manager self-tests passed")

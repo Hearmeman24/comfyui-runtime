@@ -530,6 +530,38 @@ def test_registry_mode():
     print("ok: registry mode gating, copy lists, fp8 rewrite, sidecars")
 
 
+def test_variant_env_agreement():
+    """The fp8/full DOWNLOAD choice and the workflow REWRITE must resolve
+    the variant env var identically, whatever the customer typed. Both sides
+    go through resolve_profile_key semantics: case/whitespace-insensitive
+    match on the profile keys, unknown values fall back to the group default
+    (full) - never to the wider opt-in TRUTHY set."""
+    base, legacy = registry_workflows()
+    workflows = {"base.json": base, "legacy/legacy_wf.json": legacy}
+    full, fp8 = "legacy_full.safetensors", "legacy_fp8.safetensors"
+    for val, want in [("true", fp8), ("TRUE", fp8), ("True", fp8),
+                      (" true ", fp8), ("yes", full), ("false", full),
+                      (None, full)]:
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            paths = write_fixture(tmp, TEMPLATE2, REGISTRY2, workflows)
+            env = {"download_legacy": "true"}
+            if val is not None:
+                env["lightweight_fp8"] = val
+            rc, out, names, _, dst = run_prov(paths, tmp, "variant", env)
+            ok(rc == 0, f"{val!r}: rc={rc}\n{out}")
+            queued = names & {full, fp8}
+            ok(queued == {want},
+               f"{val!r}: queued {sorted(queued)}, want {want}")
+            doc = json.loads((dst / "legacy" / "legacy_wf.json").read_text())
+            widget = node_by_id(doc, 1)["widgets_values"][0]
+            ok(widget == want,
+               f"{val!r}: workflows load {widget} but manifest queued "
+               f"{sorted(queued)}")
+    print("ok: variant download and workflow rewrite resolve the env "
+          "identically (case/whitespace tolerant, typo falls back to full)")
+
+
 def test_selftest():
     proc = subprocess.run([sys.executable, str(PROV), "--selftest"],
                           capture_output=True, text=True,
@@ -549,6 +581,7 @@ def main() -> int:
     test_missing_folder_warns()
     test_config_errors()
     test_registry_mode()
+    test_variant_env_agreement()
     test_selftest()
     print(f"all provisioner checks passed ({CHECKS} assertions)")
     return 0

@@ -220,8 +220,11 @@ wan `:77-85`) or its explicit `workflows` list (qwen's shape,
 Model selection is `build_manifest.py`'s `select()` VERBATIM, including its selftest cases
 (`comfyui-ltx2/src/build_manifest.py:42-81,100-207`): flag / `on_by_default` / `disable_flag` /
 `gated` / `variant` gating over the whole registry, then the skip-existing floor. The fp8-vs-full
-`variant` choice is driven by the env var named in `template.json`'s `variant_env` being exactly
-`"true"` (ltx2 hardcodes `lightweight_fp8`, `build_manifest.py:221-222`).
+`variant` choice is driven by the env var named in `template.json`'s `variant_env`, resolved through
+that env's swap group with `resolve_profile_key` when one exists (fp8 iff the resolved profile key is
+`"true"`), and by a stripped, lowercased compare against `"true"` when it does not. Resolving it the
+same way the workflow rewrite does is what keeps the queued file and the loader widget on the same
+variant (ltx2 hardcodes `lightweight_fp8`, `build_manifest.py:221-222`).
 
 Workflow copying comes from the flag map's `copy` lists (ltx2 does this in bash today,
 `comfyui-ltx2/src/start.sh:378-403`): each entry is a path relative to `--workflows-src`; a directory
@@ -262,7 +265,7 @@ widget values and becomes the dest filename. Schema is ltx2's, family-wide (plan
 | `flag` | string | no | Env-var gate. Absent = always selected (registry mode) / selected by workflow reference (walk mode). |
 | `on_by_default` | bool | no | Only meaningful with `flag`: inverts it to opt-out; only a literal `"false"` drops the entry (`build_manifest.py:59-68`). |
 | `disable_flag` | string | no | Independent opt-out: entry ships unless that env var is exactly `"true"` (`build_manifest.py:73`). |
-| `variant` | string | no | `"full"` or `"fp8"`. Among variant-tagged entries, keep fp8 when the `variant_env` is `"true"`, else full. Untagged entries unaffected (`build_manifest.py:77-81`). |
+| `variant` | string | no | `"full"` or `"fp8"`. Among variant-tagged entries, keep fp8 when the `variant_env` resolves to the `"true"` profile of its swap group (or, with no such group, equals `"true"` after strip and lower), else full. Untagged entries unaffected (`build_manifest.py:77-81`). |
 | `gated` | bool | no | HF-gated repo: selected only when `HF_TOKEN` is set and non-blank; without a token the entry is dropped, fail-open (`build_manifest.py:57,74`, selftest `:147-168`). |
 | `min_size_mb` | number | no | Overrides the 10 MB "looks complete" floor, both at provision time (`build_manifest.py:92`) and, via the manifest third field, at download time (§1). |
 | `auto_include_with` | string | no | Sidecar trigger: entry is added whenever the named basename is queued (`comfyui-wan/src/workflow_provisioner.py:97-102`). Runs after all gating; `baked` still excludes. |

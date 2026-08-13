@@ -12,7 +12,13 @@ Per-URL routing, so nothing is ever silently dropped:
 - anything else goes through aria2c.
 
 Every download is staged off the destination volume (local disk when it has
-room) and handed off atomically as `<dest>.partial` + os.replace, so a partial
+room). NVMe-first: a locally staged model is published at its volume path as a
+SYMLINK into the stage, so ComfyUI can load it immediately and the boot never
+waits for bytes to cross the network volume. `volume_sync.py` runs detached,
+after the launch, and turns each link into a real file. When there was no room
+locally the file staged on the volume already, and the rename is instant.
+
+Either way the publish goes through `<dest>.partial` + os.replace, so a partial
 file is never visible at the path a workflow loads from.
 """
 import json
@@ -39,8 +45,6 @@ from huggingface_hub import HfFileSystem, hf_hub_download  # noqa: E402
 # 3, never more: RunPod's network volume caps around 150 MB/s aggregate, so
 # extra streams only split the same bandwidth.
 POOL_SIZE = 3
-# Serializes the stage->volume handoff; see run_job.
-HANDOFF_LOCK = threading.Lock()
 SNAPSHOT_INTERVAL = 10  # seconds
 STALL_SECS = 300        # abandon if no global byte progress for this long
 DEADLINE_SECS = 3600    # absolute backstop for the whole download phase
@@ -84,11 +88,6 @@ class Job:
     filename: str = ""
     total_bytes: int = 0
     status: str = "queued"  # queued | active | done | failed
-    # download: bytes are landing in the stage dir.
-    # handoff:  the download is finished and the file is being copied from the
-    #           stage to the volume. stage_bytes stops moving here, which is
-    #           why progress_bytes exists (see below).
-    phase: str = "download"  # download | handoff
     start_ts: float = 0.0
     end_ts: float = 0.0
     stage_dir: Optional[Path] = None
@@ -197,28 +196,6 @@ def partial_path(job: Job) -> Path:
     return job.dest.with_name(job.dest.name + ".partial")
 
 
-def moved_bytes(job: Job) -> int:
-    """Bytes already copied onto the volume during the handoff."""
-    try:
-        return partial_path(job).stat().st_size
-    except OSError:
-        return 0
-
-
-def progress_bytes(job: Job) -> int:
-    """Bytes this job has moved, whichever phase it is in.
-
-    stage_bytes alone is not progress: once the download returns, the source
-    sits in the stage at full size and does not change for the whole
-    stage->volume copy. A 25 GB file over RunPod's ~150 MB/s volume is nearly
-    3 minutes of that, and three at once exceeded STALL_SECS on a real pod
-    (2026-08-13), so the watchdog killed copies that were working fine.
-    Summing both is monotonic across the phase change: the stage holds steady
-    while the .partial grows.
-    """
-    return stage_bytes(job) + moved_bytes(job)
-
-
 def pick_stage_dir(job: Job) -> Path:
     """Local disk when it has room for this file, else beside the destination.
 
@@ -240,10 +217,45 @@ def pick_stage_dir(job: Job) -> Path:
     return job.dest.parent / ".hf_stage" / job.dest.name
 
 
+def stage_is_local(stage: Path) -> bool:
+    """True when this job staged on the pod's own disk rather than the volume.
+
+    Decides whether the handoff can be deferred: a local stage means a
+    cross-filesystem copy worth backgrounding, a volume stage means an instant
+    same-filesystem rename.
+    """
+    try:
+        return LOCAL_STAGE.resolve() in stage.resolve().parents
+    except OSError:
+        return False
+
+
 def skip_if_present(job: Job) -> bool:
-    """A dest at/above its floor counts as done. A dest below it is a corrupted
-    partial from an earlier boot: delete it and refetch (the only existing
-    volume file the downloader is ever allowed to delete)."""
+    """Decide this entry against what is already on the volume.
+
+    The five cases, per spec section 2b. is_file() and stat() BOTH follow
+    symlinks, which is why a naive is_file() check gets row 3 wrong: it skips
+    the download and then nothing ever copies, leaving the pod depending on a
+    stage dir the next restart wipes.
+
+    | dest                         | action                                |
+    |------------------------------|---------------------------------------|
+    | regular file, >= floor       | done                                  |
+    | regular file, < floor        | delete, refetch                       |
+    | symlink, target >= floor     | done, and volume_sync still owes it    |
+    | symlink, target missing/small| unlink, refetch                       |
+    | absent                       | download                              |
+    """
+    if job.dest.is_symlink():
+        # exists() follows the link, so False here means dangling.
+        if not job.dest.exists() or job.dest.stat().st_size < floor_bytes(job):
+            print(f"[hf-manager] removing unusable symlink: {job.dest.name}",
+                  flush=True)
+            job.dest.unlink(missing_ok=True)
+            return False
+        print(f"[hf-manager] skip {job.dest.name} "
+              f"(staged, still to be copied to the volume)", flush=True)
+        return True
     if not job.dest.is_file():
         return False
     size = job.dest.stat().st_size
@@ -314,22 +326,32 @@ def run_job(job: Job, lock: threading.Lock) -> None:
                 f"downloaded {fmt_bytes(size)}, below the {job.min_size_mb:g} MB floor")
 
         if src.resolve() != job.dest.resolve():
-            # Cross-filesystem when staged locally, so this is a copy+delete.
-            # Land on a .partial name first and rename within the volume, which
-            # IS atomic: a half-copied model must never appear at the path a
-            # workflow loads from.
-            #
-            # One handoff at a time. The volume caps around 150 MB/s no matter
-            # how many writers, so three concurrent 20 GB copies just split it
-            # three ways and each takes three times as long. Waiting here is
-            # safe for the watchdog: its progress metric is global, and the
-            # holder of the lock is moving bytes the whole time.
-            tmp = partial_path(job)
-            with HANDOFF_LOCK:
-                with lock:
-                    job.phase = "handoff"
-                shutil.move(str(src), str(tmp))
+            if stage_is_local(stage):
+                # NVMe-first: publish a SYMLINK and let volume_sync.py move the
+                # bytes after ComfyUI is already up. Copying ~150 MB/s of
+                # network volume here is what used to hold the boot for minutes.
+                #
+                # Safe because ComfyUI resolves models with os.path.isfile,
+                # which follows symlinks, and carries no containment check on
+                # that path (folder_paths.py:449-458 at v0.32.0).
+                #
+                # Link via a .partial name + os.replace so publishing is atomic
+                # even when something already occupies dest.
+                tmp = partial_path(job)
+                tmp.unlink(missing_ok=True)
+                os.symlink(src, tmp)
                 os.replace(tmp, job.dest)
+                # The stage file IS the model now; do not delete the stage.
+                with lock:
+                    job.status = "done"
+                    job.end_ts = time.time()
+                return
+            # Volume-staged fallback (pick_stage_dir found no room on the local
+            # disk): same filesystem, so this rename is atomic and instant.
+            # There is nothing to defer.
+            tmp = partial_path(job)
+            shutil.move(str(src), str(tmp))
+            os.replace(tmp, job.dest)
         shutil.rmtree(stage, ignore_errors=True)
 
         if not job.dest.is_file() or job.dest.stat().st_size < floor_bytes(job):
@@ -363,24 +385,18 @@ def snapshot(jobs: list[Job], started_at: float, lock: threading.Lock,
     if active:
         lines.append("ACTIVE")
         for j in active:
-            # In the handoff phase report the copy, not the finished download:
-            # a frozen 100% at 0.0 B/s reads as a hang when the job is fine.
-            handoff = j.phase == "handoff"
-            cur = moved_bytes(j) if handoff else stage_bytes(j)
+            cur = stage_bytes(j)
             pct = (cur / j.total_bytes * 100) if j.total_bytes else 0.0
             prev_t, prev_b = prev_bytes.get(id(j), (j.start_ts, 0))
-            if handoff and prev_b > cur:
-                prev_b = 0  # phase change resets the byte baseline
             dt = max(now - prev_t, 0.001)
             speed = max(cur - prev_b, 0) / dt
             eta = (j.total_bytes - cur) / speed if speed > 0 and j.total_bytes else 0
-            label = "handoff -> volume" if handoff else "downloading"
+            prev_bytes[id(j)] = (now, cur)
             lines.append(
-                f"  {j.dest.name:<60} {label:<18} {pct:5.1f}%  "
+                f"  {j.dest.name:<60} {pct:5.1f}%  "
                 f"{fmt_bytes(cur):>9}/{fmt_bytes(j.total_bytes):<9}  "
                 f"{fmt_bytes(speed)}/s  ETA {fmt_dur(eta)}"
             )
-            prev_bytes[id(j)] = (now, cur)
     if queued:
         names = ", ".join(j.dest.name for j in queued[:8])
         more = "" if len(queued) <= 8 else f", +{len(queued) - 8} more"
@@ -414,13 +430,27 @@ def main() -> int:
     # never appears in `jobs` again, so a per-entry sweep can never reclaim it
     # (customer report, 2026-08-13). Only ever *.partial, only in directories
     # this manifest writes to.
+    # Dangling symlinks go the same way. A pod restarted before volume_sync
+    # finished leaves links pointing into a wiped /hf_stage. ComfyUI lists them
+    # (os.walk followlinks=True, folder_paths.py:416) and then logs "doesn't
+    # link anywhere" on every load, so they are dropdown litter. This runs
+    # BEFORE the skip pass so a re-download is not blocked by an existing path.
     for stale_dir in {j.dest.parent for j in jobs}:
         if not stale_dir.is_dir():
             continue
         for stale in stale_dir.glob("*.partial"):
             print(f"[hf-manager] removing stale {stale.name}", flush=True)
             stale.unlink(missing_ok=True)
-    shutil.rmtree(LOCAL_STAGE, ignore_errors=True)
+        for entry in stale_dir.iterdir():
+            if entry.is_symlink() and not entry.exists():
+                print(f"[hf-manager] removing dangling symlink {entry.name}",
+                      flush=True)
+                entry.unlink(missing_ok=True)
+    # The stage is LIVE STATE now, not scratch: a model published as a symlink
+    # lives there until volume_sync.py copies it across. Wiping it here would
+    # destroy every model a previous boot had staged but not yet copied, which
+    # is exactly the case skip_if_present row 3 exists to preserve. Per-job
+    # stage dirs are still cleared in run_job before that job downloads.
 
     for j in jobs:
         if skip_if_present(j):
@@ -462,21 +492,20 @@ def main() -> int:
             now = time.time()
             with lock:
                 finished = sum(1 for j in jobs if j.status in ("done", "failed"))
-                # progress_bytes, not stage_bytes: a job copying to the volume
-                # is working. Landed bytes are added so the total only ever
-                # rises; without them a finished job's stage going to zero
-                # would leave a high-water mark the next job has to climb back
-                # to before anything counts as progress.
-                active_bytes = sum(progress_bytes(j) for j in jobs
+                # Landed bytes are added so the total only ever rises: without
+                # them a finished job's stage going to zero would leave a
+                # high-water mark the next job has to climb back to before
+                # anything counted as progress. The watchdog guards DOWNLOADS
+                # only; the stage->volume copy is volume_sync.py's problem and
+                # cannot block the boot, so it has no deadline at all.
+                active_bytes = sum(stage_bytes(j) for j in jobs
                                    if j.status == "active")
-                landed = 0
                 for j in jobs:
                     if j.status == "done":
                         try:
-                            landed += j.dest.stat().st_size
+                            active_bytes += j.dest.stat().st_size
                         except OSError:
                             pass
-                active_bytes += landed
             if finished > last_finished or active_bytes > last_active_bytes:
                 last_finished, last_active_bytes, last_progress_at = finished, active_bytes, now
 

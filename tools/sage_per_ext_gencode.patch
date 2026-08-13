@@ -1,0 +1,77 @@
+diff --git a/setup.py b/setup.py
+index 6b2c5b4..e1cdfe5 100644
+--- a/setup.py
++++ b/setup.py
+@@ -168,6 +168,36 @@ if not SKIP_CUDA_BUILD:
+         if capability.endswith("+PTX"):
+             NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=compute_{num}"]
+ 
++    # --- per-extension gencode (comfyui-runtime patch) ---------------------
++    # Sharing one NVCC_FLAGS list across all extensions force-compiles every
++    # source for every requested arch. The sm90 extension is Hopper-only
++    # (wgmma/TMA): ptxas rejects it for sm_89/sm_120/sm_121. Each extension
++    # gets only the arches its sources support; every pair kept here already
++    # compiles in some single-arch upstream build.
++    GENCODE_BY_NUM = {}
++    BASE_NVCC_FLAGS = []
++    _i = 0
++    while _i < len(NVCC_FLAGS):
++        if NVCC_FLAGS[_i] == "-gencode" and _i + 1 < len(NVCC_FLAGS):
++            _num = NVCC_FLAGS[_i + 1].split("compute_")[1].split(",")[0]
++            GENCODE_BY_NUM.setdefault(_num, []).extend(NVCC_FLAGS[_i:_i + 2])
++            _i += 2
++        else:
++            BASE_NVCC_FLAGS.append(NVCC_FLAGS[_i])
++            _i += 1
++
++    def _nvcc_flags_for(nums):
++        flags = list(BASE_NVCC_FLAGS)
++        for _n in nums:
++            flags += GENCODE_BY_NUM.get(_n, [])
++        return flags
++
++    NVCC_FLAGS_SM80 = _nvcc_flags_for(["80", "86", "89", "90a", "120a", "121a"])
++    NVCC_FLAGS_SM89 = _nvcc_flags_for(["89", "90a", "120a", "121a"])
++    NVCC_FLAGS_SM90 = _nvcc_flags_for(["90a"])
++    NVCC_FLAGS_FUSED = _nvcc_flags_for(["80", "86", "89", "90a", "120a", "121a"])
++    # -----------------------------------------------------------------------
++
+     # Fused kernels and QAttn variants
+     from torch.utils.cpp_extension import CUDAExtension
+ 
+@@ -179,7 +209,7 @@ if not SKIP_CUDA_BUILD:
+                     "csrc/qattn/pybind_sm80.cpp",
+                     "csrc/qattn/qk_int_sv_f16_cuda_sm80.cu",
+                 ],
+-                extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
++                extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS_SM80},
+             )
+         )
+ 
+@@ -197,7 +227,7 @@ if not SKIP_CUDA_BUILD:
+                     "csrc/qattn/sm89_qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf.cu",
+                     "csrc/qattn/sm89_qk_int8_sv_f8_accum_f16_fuse_v_scale_attn_inst_buf.cu",
+                 ],
+-                extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
++                extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS_SM89},
+             )
+         )
+ 
+@@ -209,7 +239,7 @@ if not SKIP_CUDA_BUILD:
+                     "csrc/qattn/pybind_sm90.cpp",
+                     "csrc/qattn/qk_int_sv_f8_cuda_sm90.cu",
+                 ],
+-                extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
++                extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS_SM90},
+                 extra_link_args=['-lcuda'],
+             )
+         )
+@@ -218,7 +248,7 @@ if not SKIP_CUDA_BUILD:
+         CUDAExtension(
+             name="sageattention._fused",
+             sources=["csrc/fused/pybind.cpp", "csrc/fused/fused.cu"],
+-            extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
++            extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS_FUSED},
+         )
+     )
+ 

@@ -8,9 +8,14 @@ do not improvise steps. Source of truth for the design is
 
 ## What this produces
 
-Two wheels, one per CUDA major, each covering every GPU arch SageAttention
-can dispatch (sm80, sm89, sm90, sm120, sm121; sm86 needs no cubin, it uses
-the triton JIT path):
+Two wheels, one per CUDA major, each covering every GPU arch its own nvcc
+can emit (sm86 needs no cubin, it uses the triton JIT path):
+
+- cu128: sm80, sm89, sm90, sm120. **Not sm121**: nvcc 12.8 cannot emit
+  `compute_121a` (sm121 support landed in CUDA 12.9), verified the hard way
+  on an H200 2026-08-13. This costs nothing on RunPod today because no sm121
+  card is rentable there.
+- cu130: sm80, sm89, sm90, sm120, sm121.
 
 | Build | Variant | Torch trio | Published as (GitHub Release tag on `Hearmeman24/comfyui-runtime`) |
 |---|---|---|---|
@@ -30,7 +35,11 @@ Re-run the affected variant(s) whenever any of these change:
 
 - a line in `torch/cu128.txt` or `torch/cu130.txt` (the canonical trios)
 - `SAGE_COMMIT` in `tools/build_sage_wheel.sh` (currently `d1a57a546`)
-- `TORCH_CUDA_ARCH_LIST` in the same script (currently `8.0 8.9 9.0 12.0 12.1`)
+- the per-variant `TORCH_CUDA_ARCH_LIST` in the same script (currently
+  cu128 `8.0;8.9;9.0;12.0`, cu130 `8.0;8.9;9.0;12.0;12.1`; the semicolons
+  are load-bearing, see the comment in the script)
+- `tools/sage_per_ext_gencode.patch` (applied by the script after its
+  `reset --hard`; see "Per-extension gencode" below)
 
 Publishing a new Release deploys nothing by itself: wheels are baked, so
 every existing image keeps its matched pair. The rollout is plan.md 5c
@@ -40,10 +49,11 @@ bumps.
 ## Hard rules
 
 1. **Every command on the pod goes through the `runpod-ssh` MCP**
-   (`exec` / `upload` / `download` / `list_pods`). Never `ssh` or `scp` from
-   Bash. A pasted SSH connection string identifies the pod; it does not
-   authorize shelling out. If the MCP is down, stop and ask the maintainer to restart
-   it.
+   (`exec` / `upload` / `list_pods`). The MCP has **no download tool**; the
+   working egress path is `runpodctl send` / `receive` (step 7). Never `ssh`
+   or `scp` from Bash. A pasted SSH connection string identifies the pod; it
+   does not authorize shelling out. If the MCP is down, stop and ask the maintainer to
+   restart it.
 2. **Pod lifecycle (create / terminate) goes through the RunPod REST API**
    (`https://rest.runpod.io/v1`, header `Authorization: Bearer $RUNPOD_API_KEY`).
 3. **Every pod creation is a paid action and needs an explicit go from the maintainer
@@ -53,16 +63,17 @@ bumps.
    A forgotten H200 is the real cost risk of this whole procedure: at
    $4.59/hr it burns about $110/day doing nothing.
 
-## Cost and capacity (verified 2026-08-12)
+## Cost and capacity (measured, 2026-08-13 run)
 
-- H200 SXM on secure cloud is **$4.59/hr** and its stockStatus currently
-  reads **"Low"**. Build B needs a CUDA 13.0 host (R580 driver), which
-  narrows the host pool further, so **build B may have to wait for
-  capacity**. Re-check price and stock at run time; do not assume these
+- H200 SXM on secure cloud was **$4.59/hr**, stockStatus read **Medium**,
+  and CUDA 13.0 capacity (R580 host, needed for build B) was available
+  immediately. Re-check price and stock at run time; do not assume these
   numbers held.
-- Expected compile time is 30 to 90 minutes per build (single-arch boot
-  builds run 3 to 5 minutes today; this builds five arch targets). Budget
-  $10 to $15 for both builds. These are estimates, not measurements.
+- A successful build's wall clock is **10 to 14 minutes per variant**. The
+  whole first run cost **~$8.80 over ~1h55m across three pods** - one cu128
+  attempt was terminated and redone, and most of the time went to image
+  pulls, debugging and transfer, not compiling. Budget ~$10 for a clean
+  re-run of both variants.
 
 ## Pod spec per build
 
@@ -85,7 +96,8 @@ matching variant tag is an equally good (and smaller) pod image.
 
 ## Procedure, per build
 
-Run build A first, then B. Steps 2 to 10 repeat per variant.
+Run builds A and B **in parallel** (two pods at once): the GPU-hours cost
+the same and the wall clock halves. Steps 2 to 10 repeat per variant.
 
 ### 1. Preflight, local
 
@@ -97,28 +109,26 @@ Run build A first, then B. Steps 2 to 10 repeat per variant.
 
 ### 2. Create the pod (RunPod REST API)
 
-Find the GPU type id first (do not guess it):
-
-```
-GET https://rest.runpod.io/v1/gputypes
-```
-
-Pick the H200 SXM entry; note its `id`, current price and stockStatus. Then
-create the pod. Payload sketch (field names drift; verify against the
-current REST docs before sending):
+There is no `GET /v1/gputypes` endpoint (verified 2026-08-13: it 404s).
+`gpuTypeIds` is an enum on `POST /pods`; the H200 SXM id is the literal
+string `"NVIDIA H200"`. Current price and stockStatus come from the GraphQL
+API, not REST.
 
 ```
 POST https://rest.runpod.io/v1/pods
 {
   "name": "sage-wheel-<variant>",
   "imageName": "<container image from the table>",
-  "gpuTypeIds": ["<H200 SXM id>"],
+  "gpuTypeIds": ["NVIDIA H200"],
   "gpuCount": 1,
   "cloudType": "SECURE",
   "containerDiskInGb": 100,
-  "allowedCudaVersions": ["12.8"]        // build B: ["13.0", "13.1", ...]
+  "allowedCudaVersions": ["12.8"]        // build B: ["13.0"]
 }
 ```
+
+The `allowedCudaVersions` enum caps at `"13.0"` (verified 2026-08-13:
+`"13.1"` is rejected). For build B, `["13.0"]` alone is the whole filter.
 
 If creation fails with no capacity (expected for build B while stock is
 Low), stop and report; do not retry in a loop at $4.59/hr risk elsewhere.
@@ -128,19 +138,28 @@ Low), stop and report; do not retry in a loop at $4.59/hr risk elsewhere.
 `runpod-ssh list_pods` until the new pod shows up running. Record its pod id
 and name; every following step targets it.
 
-### 4. Upload the three inputs
+### 4. Upload the four inputs
 
-Via `runpod-ssh upload`, into `/tmp/sagebuild/` on the pod:
+Create the remote directory first - `upload` does not create missing parent
+directories:
+
+```
+runpod-ssh exec: mkdir -p /tmp/sagebuild
+```
+
+Then via `runpod-ssh upload`, into `/tmp/sagebuild/` on the pod:
 
 - `tools/build_sage_wheel.sh`
+- `tools/sage_per_ext_gencode.patch` (the script dies without it)
 - `torch/<variant>.txt` (i.e. `cu128.txt` or `cu130.txt`, kept under that
   exact filename; the script resolves `<script dir>/<variant>.txt`)
 - `src/sage_probe.py`
 
 ### 5. Run the build, detached
 
-The compile runs 30 to 90 minutes, longer than any sane exec timeout, so
-start it detached and poll the log:
+A successful build runs 10 to 14 minutes wall clock (measured 2026-08-13),
+still longer than a sane exec timeout, so start it detached and poll the
+log:
 
 ```
 runpod-ssh exec: bash -c 'cd /tmp/sagebuild && nohup bash build_sage_wheel.sh cu128 > build.log 2>&1 & echo started'
@@ -152,13 +171,24 @@ runpod-ssh exec: bash -c 'cd /tmp/sagebuild && nohup bash build_sage_wheel.sh cu
 runpod-ssh exec: tail -n 40 /tmp/sagebuild/build.log
 ```
 
+To confirm mid-build that the right arch list actually reached the compile,
+do NOT wait for `Target compute capabilities` in the log - pip buffers
+`setup.py`'s stdout and only flushes it when the build ends. Instead read
+the `-gencode` flags off the live compiler processes:
+
+```
+runpod-ssh exec: ps aux | grep -o -- '-gencode[= ]arch=[^ ]*' | sort -u
+```
+
 The script is `set -e` end to end. Outcomes:
 
 - **Success**: the log ends with `== wheel built and gated (<variant>) ==`,
   the wheel path, and a `sha256sum` line. Both gates have passed ON the pod:
   the cuobjdump cubin assertions (`_qattn_sm80` has sm_80; `_qattn_sm89` has
-  sm_89, sm_120 and sm_121; `_qattn_sm90` has sm_90a) and a real kernel
-  launch of the freshly installed wheel on the H200.
+  sm_89 plus sm_120a - and sm_121a on cu130 only; `_qattn_sm90` has sm_90a;
+  Blackwell cubins are always the arch-specific `a` variants, plain
+  sm_120/sm_121 never appear in an upstream build) and a real kernel launch
+  of the freshly installed wheel on the H200.
 - **Failure**: an `ERROR:` line (or a compiler error) near the end of the
   log. See Known risk below for the one failure mode we half expect. Either
   way, continue to step 10 and terminate the pod.
@@ -170,15 +200,23 @@ notes and the Dockerfile checksum.
 
 ### 7. Download the wheel
 
-Get the exact filename first:
+The `runpod-ssh` MCP has no download tool (verified 2026-08-13). The
+working egress is `runpodctl send` / `receive`, which needs no config on
+the pod. Get the exact filename first:
 
 ```
 runpod-ssh exec: ls /tmp/sage_build/wheel/
+runpod-ssh exec: runpodctl send /tmp/sage_build/wheel/<wheel filename>
 ```
 
-then `runpod-ssh download` it to a durable local path, for example
-`~/src/comfy/comfyui-runtime/dist/<variant>/` (untracked; wheels never enter
-git, the repo must stay blob-free so the boot clone stays fast).
+`send` prints a one-time code. Locally, from the destination directory
+(for example `~/src/comfy/comfyui-runtime/dist/<variant>/` - gitignored;
+wheels never enter git, the repo must stay blob-free so the boot clone
+stays fast):
+
+```
+runpodctl receive <code>
+```
 
 ### 8. Verify the local copy
 
@@ -187,7 +225,7 @@ value from step 6 exactly. If it does not, the download is corrupt; delete
 and re-download. Never publish a wheel whose local hash you have not
 matched against the on-pod hash.
 
-### 9. (Build A done) Repeat steps 2 to 10 for build B
+### 9. Same steps for the other variant (run in parallel, see above)
 
 ### 10. Terminate and confirm - ALWAYS, success or failure
 
@@ -215,9 +253,15 @@ The notes MUST record, per plan.md section 5 step 4:
 
 - the wheel's sha256 (from step 6/8)
 - the full torch trio it links (paste `torch/<variant>.txt`'s three pins)
-- `SAGE_COMMIT=d1a57a546`
-- `TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 12.0 12.1"`
+- the full `SAGE_COMMIT`
+- the `TORCH_CUDA_ARCH_LIST` actually used for THAT variant (cu128
+  `"8.0;8.9;9.0;12.0"`, cu130 `"8.0;8.9;9.0;12.0;12.1"`)
+- the arch coverage proven by the on-pod cuobjdump gate, and that a real
+  sm90 kernel launch passed on the build pod
 - the build pod GPU (H200 SXM) and date
+- for cu128 only: that the wheel does NOT cover sm121, and why (nvcc 12.8
+  cannot emit `compute_121a`; sm121 needs CUDA 12.9+)
+- that the build applies `tools/sage_per_ext_gencode.patch`, and why
 
 Release tags are production infrastructure once `base/Dockerfile` points at
 them: never delete or retag a published sage Release.
@@ -236,14 +280,17 @@ Then the base build's variant-matched import assertion is the standing drift
 gate: a trio bump without a wheel re-run dies at image build time, never on
 a customer pod.
 
-## Known risk, documented not solved
+## Per-extension gencode (the risk that materialized)
 
 `-gencode` flags are shared across ALL extensions in SageAttention's
-`setup.py`, so the sm90a source must also compile under 8.0, 8.9, 12.0 and
-12.1. The first pod run is the proof. If it fails, the fallback is a small
-per-extension gencode patch kept IN THIS REPO (`comfyui-runtime`) and
-applied by `build_sage_wheel.sh` after the `reset --hard`, never a fork of
-SageAttention. A failed compile costs one pod-hour, not a release.
+`setup.py`, so the Hopper-only sm90 source (wgmma/TMA) gets force-compiled
+for 8.0, 8.9, 12.0 and 12.1 too - and ptxas rejects it ("Instruction
+'wgmma.mma_async ...' not supported on .target 'sm_89'"). Proven on the
+first pod run, 2026-08-13. The documented fallback is now the standing
+mechanism: `tools/sage_per_ext_gencode.patch` gives each extension only the
+arches its sources support, and `build_sage_wheel.sh` applies it fresh on
+every build after the `reset --hard`. Never fork SageAttention; if the
+patch stops applying after a `SAGE_COMMIT` bump, rebase the patch here.
 
 ## Troubleshooting
 
@@ -261,6 +308,6 @@ SageAttention. A failed compile costs one pod-hour, not a release.
 - **Probe failure after both installs**: the wheel imports but cannot launch
   a kernel. Do not publish. This is the exact failure class this whole
   procedure exists to keep off customer pods.
-- **No CUDA 13 capacity**: expected while H200 stock is Low. Build A does
-  not depend on build B; publish A and wait for B rather than substituting a
-  different GPU.
+- **No CUDA 13 capacity**: did not happen on the 2026-08-13 run (capacity
+  was immediate), but if it does: build A does not depend on build B;
+  publish A and wait for B rather than substituting a different GPU.

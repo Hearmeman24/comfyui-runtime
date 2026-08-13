@@ -20,6 +20,15 @@ spec D5). What must hold:
 
 The start.sh block is exercised for real: extracted between its begin/end
 markers and run under bash with a stubbed ComfyUI tree. No pod, no network.
+
+Same technique, second block: the custom-node clone loop's conditional
+requirements install. A pack's requirements install only when the checkout
+actually changed , fresh clone, a pull that moved HEAD, or a pin reset that
+moved HEAD , never on an "Already up to date" boot, and never on a FAILED
+pull (regression: ltx2 v10 reran every pack's install each boot, which kept
+clobbering onnxruntime-gpu and forced a 250 MB reinstall). Skipped packs must
+leave no entry in PIP_INSTALL_PIDS for the wait loop to choke on. Exercised
+with local throwaway git repos and a stubbed pip on PATH.
 Run: python3 tools/test_model_paths.py
 """
 import os
@@ -402,6 +411,204 @@ def test_block_no_network_volume():
         # Dirs still exist so nothing downstream trips on a missing path.
         ok(created_model_dirs(persist) == sorted(set(v for _, v in EXPECTED_STUB)),
            created_model_dirs(persist))
+
+
+# --- the custom-node clone loop block ---------------------------------------
+
+NODES_PRELUDE = (
+    'report_warn() { printf "%s\\n" "$1" >> "$WARN_FILE"; }\n'
+    'template_json_get() {\n'
+    '  case "$1" in\n'
+    '    custom_nodes.target) printf "%s" "image" ;;\n'
+    '    custom_nodes.repos)\n'
+    '      [ -n "${REPO_ENTRIES:-}" ] && printf "%s\\n" $REPO_ENTRIES ;;\n'
+    '  esac\n'
+    '  return 0\n'
+    '}\n'
+)
+
+# The real wait loop's pattern (start.sh, pre-launch): a skipped install must
+# not leave an entry behind that wait would then choke on.
+NODES_FOOTER = (
+    '\nfor name in "${!PIP_INSTALL_PIDS[@]}"; do\n'
+    '  if wait "${PIP_INSTALL_PIDS[$name]}"; then\n'
+    '    printf "WAITED=%s\\n" "$name"\n'
+    '  else\n'
+    '    printf "WAITFAIL=%s\\n" "$name"\n'
+    '  fi\n'
+    'done\n'
+    'printf "PIDS=%s\\n" "${!PIP_INSTALL_PIDS[*]}"\n'
+)
+
+
+def extract_nodes_block():
+    lines = START.read_text().splitlines()
+    beg = [i for i, l in enumerate(lines) if "custom-node clone loop: begin" in l]
+    end = [i for i, l in enumerate(lines) if "custom-node clone loop: end" in l]
+    ok(len(beg) == 1 and len(end) == 1 and beg[0] < end[0],
+       "start.sh must carry exactly one custom-node-clone-loop marker pair")
+    return "\n".join(lines[beg[0]:end[0] + 1])
+
+
+def git_in(cwd, *args):
+    r = subprocess.run(["git", "-c", "user.email=ci@example.invalid",
+                        "-c", "user.name=ci", "-c", "init.defaultBranch=main",
+                        *args], cwd=cwd, capture_output=True, text=True)
+    ok(r.returncode == 0, f"git {args} in {cwd} failed: {r.stderr}")
+    return r.stdout.strip()
+
+
+def make_node_repo(tmp, name):
+    """A throwaway upstream repo with a requirements.txt, one commit."""
+    src = Path(tmp) / "upstream" / name
+    src.mkdir(parents=True)
+    (src / "requirements.txt").write_text("example-pkg==1.0\n")
+    git_in(src, "init", "-q")
+    git_in(src, "add", "-A")
+    git_in(src, "commit", "-qm", "v1")
+    return src
+
+
+def bump_node_repo(src, msg):
+    (src / "CHANGELOG").write_text(msg + "\n")
+    git_in(src, "add", "-A")
+    git_in(src, "commit", "-qm", msg)
+    return git_in(src, "rev-parse", "HEAD")
+
+
+def run_nodes_block(tmp, entries):
+    """One boot of the real clone-loop block: stubbed pip records its calls,
+    local-path repo entries, no network. Returns (stdout, pip calls, PID-array
+    key list)."""
+    tmp = Path(tmp)
+    stub_bin = tmp / "bin"
+    stub_bin.mkdir(exist_ok=True)
+    pip = stub_bin / "pip"
+    pip.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$PIP_CALLS"\n')
+    pip.chmod(0o755)
+    pip_calls = tmp / "pip_calls"
+    pip_calls.write_text("")
+    warn_file = tmp / "warns"
+    warn_file.write_text("")
+    comfy = tmp / "ComfyUI"
+    comfy.mkdir(exist_ok=True)
+    script = tmp / "nodes_block.sh"
+    script.write_text(NODES_PRELUDE + extract_nodes_block() + NODES_FOOTER)
+    env = {
+        "PATH": f"{stub_bin}:{os.environ['PATH']}",
+        "HOME": os.environ.get("HOME", str(tmp)),
+        "COMFYUI_DIR": str(comfy),
+        "PERSIST_ROOT": str(tmp / "nv" / "ComfyUI"),
+        "REPO_ENTRIES": " ".join(entries),
+        "WARN_FILE": str(warn_file),
+        "PIP_CALLS": str(pip_calls),
+    }
+    r = subprocess.run([BASH4, str(script)], env=env,
+                       capture_output=True, text=True)
+    ok(r.returncode == 0, f"nodes block exited {r.returncode}: {r.stderr}")
+    calls = [l for l in pip_calls.read_text().splitlines() if l]
+    pids = []
+    for line in r.stdout.splitlines():
+        if line.startswith("PIDS="):
+            pids = line[len("PIDS="):].split()
+    return r.stdout, calls, pids
+
+
+def node_head(tmp, name):
+    return git_in(Path(tmp) / "ComfyUI" / "custom_nodes" / name,
+                  "rev-parse", "HEAD")
+
+
+def test_nodes_fresh_clone_installs():
+    if BASH4 is None:
+        SKIPPED.append("test_nodes_fresh_clone_installs (no bash 4+)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        src = make_node_repo(tmp, "NodePackA")
+        out, calls, pids = run_nodes_block(tmp, [str(src)])
+        ok(any("NodePackA/requirements.txt" in c for c in calls),
+           f"fresh clone must install requirements: {calls}")
+        ok(pids == ["NodePackA"], f"install must be waited on: {pids}")
+        ok("WAITED=NodePackA" in out, out)
+
+
+def test_nodes_unchanged_pull_skips_install():
+    if BASH4 is None:
+        SKIPPED.append("test_nodes_unchanged_pull_skips_install (no bash 4+)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        src = make_node_repo(tmp, "NodePackA")
+        run_nodes_block(tmp, [str(src)])  # boot 1: fresh clone
+        out, calls, pids = run_nodes_block(tmp, [str(src)])  # boot 2: no change
+        ok(calls == [],
+           f"'Already up to date' must not reinstall requirements: {calls}")
+        ok(pids == [], f"a skipped install must leave no PID entry: {pids}")
+        ok("NodePackA" in out and "skip" in out.lower(),
+           f"the skip must be said in the boot log: {out}")
+
+
+def test_nodes_pull_that_moves_head_installs():
+    if BASH4 is None:
+        SKIPPED.append("test_nodes_pull_that_moves_head_installs (no bash 4+)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        src = make_node_repo(tmp, "NodePackA")
+        run_nodes_block(tmp, [str(src)])
+        new_sha = bump_node_repo(src, "v2")
+        _, calls, pids = run_nodes_block(tmp, [str(src)])
+        ok(any("NodePackA/requirements.txt" in c for c in calls),
+           f"a pull that moved HEAD must reinstall requirements: {calls}")
+        ok(pids == ["NodePackA"], pids)
+        ok(node_head(tmp, "NodePackA") == new_sha, "pull must have landed v2")
+
+
+def test_nodes_pin_already_current_skips_install():
+    if BASH4 is None:
+        SKIPPED.append("test_nodes_pin_already_current_skips_install (no bash 4+)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        src = make_node_repo(tmp, "NodePackA")
+        run_nodes_block(tmp, [str(src)])
+        sha = node_head(tmp, "NodePackA")
+        out, calls, pids = run_nodes_block(tmp, [f"{src}|{sha}"])
+        ok(calls == [],
+           f"a pin already checked out must not reinstall: {calls}")
+        ok(pids == [], pids)
+        ok("skip" in out.lower(), out)
+
+
+def test_nodes_pin_reset_that_moves_head_installs():
+    if BASH4 is None:
+        SKIPPED.append("test_nodes_pin_reset_that_moves_head_installs (no bash 4+)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        src = make_node_repo(tmp, "NodePackA")
+        run_nodes_block(tmp, [str(src)])
+        new_sha = bump_node_repo(src, "v2")
+        _, calls, pids = run_nodes_block(tmp, [f"{src}|{new_sha}"])
+        ok(any("NodePackA/requirements.txt" in c for c in calls),
+           f"a pin reset that moved HEAD must reinstall requirements: {calls}")
+        ok(pids == ["NodePackA"], pids)
+        ok(node_head(tmp, "NodePackA") == new_sha, "reset must have landed the pin")
+
+
+def test_nodes_failed_pull_does_not_install():
+    if BASH4 is None:
+        SKIPPED.append("test_nodes_failed_pull_does_not_install (no bash 4+)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        src = make_node_repo(tmp, "NodePackA")
+        run_nodes_block(tmp, [str(src)])
+        sha = node_head(tmp, "NodePackA")
+        # Break the remote: the pull now fails, HEAD stays put.
+        git_in(Path(tmp) / "ComfyUI" / "custom_nodes" / "NodePackA",
+               "remote", "set-url", "origin", str(Path(tmp) / "gone"))
+        out, calls, pids = run_nodes_block(tmp, [str(src)])
+        ok("git pull failed" in out, out)
+        ok(calls == [],
+           f"a FAILED pull must not count as moved and reinstall: {calls}")
+        ok(pids == [], pids)
+        ok(node_head(tmp, "NodePackA") == sha, "HEAD must be untouched")
 
 
 def main():

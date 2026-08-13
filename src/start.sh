@@ -408,9 +408,11 @@ fi
 # ---------------------------------------------------------------------------
 # Custom-node clone loop from template.json custom_nodes.repos.
 # Entry syntax (CONTRACTS.md section 5): "<url>", "<url>|<sha>", "<url>|force".
-# Requirements installs are backgrounded; PIDs collected and waited before
+# Requirements installs run only when the checkout changed (fresh clone, or
+# HEAD moved), are backgrounded, and their PIDs collected and waited before
 # launch (wan start.sh:199-217,413-429). PIP_CONSTRAINT (base-owned) applies.
 # ---------------------------------------------------------------------------
+# --- custom-node clone loop: begin ------------------------------------------
 if [ "$(template_json_get custom_nodes.target)" = "volume" ]; then
     CUSTOM_NODES_DIR="$PERSIST_ROOT/custom_nodes"
 else
@@ -440,6 +442,12 @@ for entry in "${CUSTOM_NODE_REPOS[@]}"; do
         fi
     fi
 
+    # HEAD before any clone/pull/reset: requirements reinstall only when the
+    # checkout actually moves (ltx2 638dddf start.sh:93-100). Unconditional
+    # reinstalls cost every boot and kept clobbering onnxruntime-gpu.
+    head_before=""
+    [ -d "$dir/.git" ] && head_before=$(git -C "$dir" rev-parse HEAD 2>/dev/null)
+
     if [ ! -d "$dir/.git" ]; then
         echo "📥 Cloning $name..."
         git clone "$url" "$dir" || { echo "❌ Failed to clone $name. Its nodes will be missing."
@@ -458,11 +466,19 @@ for entry in "${CUSTOM_NODE_REPOS[@]}"; do
     fi
 
     if [ -f "$dir/requirements.txt" ]; then
-        echo "🔧 Installing $name requirements (background)..."
-        pip install -r "$dir/requirements.txt" > "/tmp/pip_${name}.log" 2>&1 &
-        PIP_INSTALL_PIDS[$name]=$!
+        # Skip only when HEAD provably stayed put: a fresh clone has no
+        # head_before, and a failed pull leaves HEAD (and the skip) in place.
+        head_after=$(git -C "$dir" rev-parse HEAD 2>/dev/null)
+        if [ -n "$head_before" ] && [ "$head_before" = "$head_after" ]; then
+            echo "⏭️  $name unchanged; skipping requirements install."
+        else
+            echo "🔧 Installing $name requirements (background)..."
+            pip install -r "$dir/requirements.txt" > "/tmp/pip_${name}.log" 2>&1 &
+            PIP_INSTALL_PIDS[$name]=$!
+        fi
     fi
 done
+# --- custom-node clone loop: end --------------------------------------------
 
 # ---------------------------------------------------------------------------
 # pre_download hook (CONTRACTS.md section 7): sourced, not exec'd, so it may

@@ -282,6 +282,35 @@ def test_stage_fallback(tmp):
     print("ok: 2.5x headroom check picks local disk vs volume fallback")
 
 
+def test_status_file(tmp):
+    """HF_STATUS_FILE (boot-report feed, EXECUTION.md N1): every entry's
+    final status and error land in the JSON, success and failure alike."""
+    import json
+    reset_calls()
+    dm.LOCAL_STAGE = tmp / "hf_stage"
+    status_path = tmp / "hf_status.json"
+    os.environ["HF_STATUS_FILE"] = str(status_path)
+    ok_dest = tmp / "models" / "vae" / "ok.safetensors"
+    bad_dest = tmp / "models" / "checkpoints" / "bad.safetensors"
+    man = tmp / "m.tsv"
+    man.write_text(
+        f"https://huggingface.co/org/repo/resolve/main/ok.safetensors\t{ok_dest}\t0.01\n"
+        f"https://huggingface.co/org/repo/resolve/main/bad.safetensors\t{bad_dest}\t50\n"
+    )
+    HF_BEHAVIOR["size_bytes"] = 32 * 1024  # below bad's 50 MB floor
+    try:
+        rc, _ = run_main(man)
+    finally:
+        del os.environ["HF_STATUS_FILE"]
+    assert rc == 1
+    status = json.loads(status_path.read_text())
+    assert status["ok.safetensors"]["status"] == "done", status
+    assert status["ok.safetensors"]["error"] is None, status
+    assert status["bad.safetensors"]["status"] == "failed", status
+    assert "floor" in status["bad.safetensors"]["error"], status
+    print("ok: HF_STATUS_FILE records per-entry status and error")
+
+
 class WatchdogExit(Exception):
     pass
 
@@ -326,7 +355,7 @@ def main() -> int:
     test_env_timeouts()
     for test in (test_parse_manifest, test_exit_codes, test_happy_path,
                  test_skip_and_refetch, test_floor_failure,
-                 test_stage_fallback, test_watchdog):
+                 test_stage_fallback, test_status_file, test_watchdog):
         with tempfile.TemporaryDirectory() as tmp:
             test(Path(tmp))
     print("all download manager self-tests passed")

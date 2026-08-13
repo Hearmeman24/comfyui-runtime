@@ -15,6 +15,7 @@ Every download is staged off the destination volume (local disk when it has
 room) and handed off atomically as `<dest>.partial` + os.replace, so a partial
 file is never visible at the path a workflow loads from.
 """
+import json
 import os
 import re
 import shutil
@@ -89,6 +90,22 @@ class Job:
 
 def floor_bytes(job: Job) -> int:
     return int(job.min_size_mb * 1024 * 1024)
+
+
+def write_status(jobs: list) -> None:
+    """Optional boot-report feed (EXECUTION.md item N1): when HF_STATUS_FILE
+    is set in the environment, record every entry's final status and error so
+    boot_report.py can name each failure with its reason. Never fatal; the
+    deployment report falls back to a disk audit without it."""
+    path = os.environ.get("HF_STATUS_FILE")
+    if not path:
+        return
+    try:
+        payload = {j.dest.name: {"status": j.status, "error": j.error,
+                                 "url": j.url} for j in jobs}
+        Path(path).write_text(json.dumps(payload, indent=1))
+    except OSError as e:
+        print(f"[hf-manager] could not write status file: {e}", flush=True)
 
 
 def parse_manifest(path: Path) -> list[Job]:
@@ -339,6 +356,7 @@ def main() -> int:
     jobs = parse_manifest(manifest)
     if not jobs:
         print("[hf-manager] empty manifest, nothing to do", flush=True)
+        write_status(jobs)
         return 0
 
     # A pod killed mid-move leaves <name>.partial behind. It is not loadable
@@ -356,6 +374,7 @@ def main() -> int:
     pending = [j for j in jobs if j.status == "queued"]
     if not pending:
         print(f"[hf-manager] all {len(jobs)} files already on disk", flush=True)
+        write_status(jobs)
         return 0
 
     print(f"[hf-manager] {len(pending)} of {len(jobs)} files to download; "
@@ -405,12 +424,14 @@ def main() -> int:
                 print(f"[hf-manager] {reason}: abandoning {len(stuck)} download(s) and continuing boot",
                       flush=True)
                 snapshot(jobs, started_at, lock, prev_bytes)
+                write_status(jobs)
                 sys.stdout.flush()
                 os._exit(1)  # leave stuck download threads behind; boot proceeds
     finally:
         pool.shutdown(wait=False)
 
     snapshot(jobs, started_at, lock, prev_bytes)
+    write_status(jobs)
     failed = [j for j in jobs if j.status == "failed"]
     if failed:
         print(f"[hf-manager] {len(failed)} failures (boot continues; see notice + README)", flush=True)

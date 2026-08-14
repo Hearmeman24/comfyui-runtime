@@ -562,6 +562,61 @@ def test_variant_env_agreement():
           "identically (case/whitespace tolerant, typo falls back to full)")
 
 
+def test_deprecated_flag():
+    """A retired flag must stay ACCEPTED: warn, ship nothing, never break a boot.
+
+    CLAUDE.md section 3: "Never remove a registry entry that an env value maps
+    to; keep the value accepted." A customer with download_ltx2_19b=true saved
+    in their RunPod template must get a clear line and a working pod, not a
+    dead one.
+    """
+    registry = {
+        "keep.safetensors": {"url": "https://h/k", "subdir": "vae",
+                             "flag": "download_new"},
+        "retired.safetensors": {"url": "https://h/r", "subdir": "vae",
+                                "flag": "download_old"},
+    }
+    template = {
+        "provisioning_mode": "registry",
+        "flags": {"download_new": {"copy": ["new.json"]}},
+        "deprecated_flags": {
+            "download_old": "LTX-2 19B is retired; use download_ltx25 instead. "
+                            "Models already on your volume are untouched."
+        },
+    }
+    wf = {"new.json": {"nodes": [{"id": 1, "type": "L",
+                                  "widgets_values": ["keep.safetensors"]}]}}
+
+    # Set the retired flag: warns, ships nothing from it, still exits 0.
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        paths = write_fixture(tmp, template, registry, wf)
+        rc, out, names, _, dst = run_prov(
+            paths, tmp, "dep-on",
+            {"download_new": "true", "download_old": "true"})
+        ok(rc == 0, f"a retired flag must never fail the boot: rc={rc}\n{out}")
+        ok("retired" in out.lower() or "deprecat" in out.lower(),
+           f"the deprecation must be announced: {out}")
+        ok("download_ltx25" in out,
+           f"the message must name the replacement: {out}")
+        ok("retired.safetensors" not in names,
+           f"a retired flag must queue nothing: {sorted(names)}")
+        ok("keep.safetensors" in names,
+           f"other flags must be unaffected: {sorted(names)}")
+
+    # Not set: no noise at all.
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        paths = write_fixture(tmp, template, registry, wf)
+        rc, out, names, _, _ = run_prov(paths, tmp, "dep-off",
+                                        {"download_new": "true"})
+        ok(rc == 0, f"rc={rc}\n{out}")
+        ok("download_ltx25" not in out,
+           f"an unset retired flag must print nothing: {out}")
+        ok("retired.safetensors" not in names, "still never queued")
+    print("ok: a deprecated flag is accepted, announced, and ships nothing")
+
+
 def test_selftest():
     proc = subprocess.run([sys.executable, str(PROV), "--selftest"],
                           capture_output=True, text=True,
@@ -582,6 +637,7 @@ def main() -> int:
     test_config_errors()
     test_registry_mode()
     test_variant_env_agreement()
+    test_deprecated_flag()
     test_selftest()
     print(f"all provisioner checks passed ({CHECKS} assertions)")
     return 0

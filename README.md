@@ -4,9 +4,14 @@ Shared runtime for the HearmemanAI ComfyUI RunPod pod templates (wan, minimax, l
 the download manager, the model provisioner, the shared boot script, the model validator, the base
 image Dockerfile, and the SageAttention wheel build tooling.
 
-Templates do not vendor these files. Each template clones this repo at boot and pins it by commit
-SHA in its own `pins.json` (`runtime_ref` plus `base_image`). A push here deploys nowhere on its
-own; a template picks up a change only when its pin is bumped.
+Templates do not vendor these files. Each template clones this repo at boot at the `runtime_ref`
+pinned in its own `pins.json` (alongside `base_image`). All four currently pin the **branch**
+`stable`, so a merge to `main` deploys nowhere on its own: the runtime goes live when `stable`
+moves, and then it reaches every template at once on the next pod boot.
+
+**Start with [`ARCHITECTURE.md`](./ARCHITECTURE.md)** — how the templates and this runtime fit
+together, the three tiers of change and their blast radius, the promotion model, and what
+`template.json` is for. Read it before `CONTRACTS.md`.
 
 This repo is public because the templates must clone it unauthenticated at boot. A private repo
 would force a PAT into every public template.

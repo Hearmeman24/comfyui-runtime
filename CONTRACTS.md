@@ -298,6 +298,9 @@ pins, sage on/off").
   "flags": { /* §5b */ },
   "swap_groups": [ /* §5a */ ],          // optional
   "variant_env": "lightweight_fp8",      // optional; registry-mode fp8/full switch (§3)
+  "deprecated_flags": {                  // optional; retired flags, still ACCEPTED
+    "download_ltx2_19b": "LTX-2 19B is retired; use download_ltx25 instead."
+  },                                     //   announced when set, enables nothing, queues nothing
   "auto_download": [ "rife49.pth" ],     // optional; walk mode: fetched by node packs at runtime
                                          //   (comfyui-wan/src/workflow_provisioner.py:33-39)
   "image_baked": [ "4xLSDIR.pth" ],      // optional; walk mode: baked into the image (wan :42)

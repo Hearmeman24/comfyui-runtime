@@ -75,6 +75,18 @@ SMALL_FLOOR_MB = 10
 # section 3 step 2.
 MODEL_EXTS = (".safetensors", ".bin", ".onnx", ".pth", ".ckpt", ".pt", ".gguf")
 MODEL_PAT = re.compile(r'"([^"]+\.(?:safetensors|bin|onnx|pth|ckpt|pt|gguf))"')
+
+# The only unregistered basenames a shipped workflow may name. Everything else
+# a loader points at must be in the registry, or the template promises a model
+# it never delivers (E13). Deliberately an explicit set, not a `Your_*` prefix
+# match: a typo'd placeholder should fail loudly, and adding a fourth name
+# should be a decision someone makes on purpose rather than a filename that
+# happens to fit a pattern.
+PLACEHOLDERS = frozenset({
+    "Your_Character_LoRA_Here.safetensors",
+    "Your_LoRA_Here_HIGH_NOISE.safetensors",
+    "Your_LoRA_Here_LOW_NOISE.safetensors",
+})
 # https://huggingface.co/<owner>/<repo>/resolve/<rev>/<path/in/repo>
 HF_RESOLVE_RE = re.compile(
     r"^https?://huggingface\.co/(?P<repo>[^/]+/[^/]+)/resolve/(?P<rev>[^/]+)/(?P<file>.+?)(?:\?.*)?$")
@@ -201,26 +213,68 @@ def workflow_widget_refs(doc: dict) -> set[str]:
     return refs
 
 
+def scannable_text(doc: dict, fallback: str) -> str:
+    """The file's text with `extra.prompt` removed.
+
+    `extra.prompt` is an API-format snapshot the frontend stashes beside the
+    graph: the flat {"1": {"class_type", "inputs"}} form that gets POSTed to
+    /prompt. ComfyUI executes doc["nodes"], never this, and the snapshot goes
+    stale the moment the graph is rewritten without re-saving.
+
+    Comfy-Org ships exactly that in its own LTX-2.5 templates: both carry a
+    26-node snapshot of a hand-wired pipeline (CheckpointLoaderSimple,
+    LTXVGemmaCLIPModelLoader, gemma-3-12b) under a live graph that is now a
+    single subgraph node. Scanning it reported three models as missing on a
+    pod where nothing was missing. Warnings people learn to ignore are worse
+    than no warnings, and this one is upstream debris we cannot fix at source.
+    """
+    if not isinstance(doc, dict):
+        return fallback
+    extra = doc.get("extra")
+    if not isinstance(extra, dict) or "prompt" not in extra:
+        return fallback
+    pruned = {**doc, "extra": {k: v for k, v in extra.items() if k != "prompt"}}
+    try:
+        return json.dumps(pruned)
+    except (TypeError, ValueError):
+        return fallback  # unserialisable doc: scan everything rather than nothing
+
+
 def check_coverage(registry: dict, workflows_dir: Path,
                    allow: frozenset = frozenset()) -> tuple[list[str], list[str]]:
-    """(errors, warnings). Unknown basenames are user-supplied WARNINGS;
-    a known basename referenced with the wrong folder prefix is an ERROR."""
+    """(errors, warnings).
+
+    A loader widget naming a file the template does not ship is an ERROR
+    unless it is a PLACEHOLDER: that is the E13 gate, and it is what stops a
+    personal LoRA leaking into a shipped workflow again. A known basename
+    referenced with the wrong folder prefix is an ERROR too.
+
+    The raw-text scan stays warning-level. It reads note prose and
+    properties.models, where a false positive is cheap and a hard failure
+    would be wrong: properties.models is a fetch-if-missing hint, not what
+    the loader loads.
+    """
     errors, warnings = [], []
     warned: set[str] = set()
     for wf in sorted(Path(workflows_dir).rglob("*.json")):
         try:
-            text = wf.read_text()
-            doc = json.loads(text)
+            raw = wf.read_text()
+            doc = json.loads(raw)
         except Exception:
             continue  # reported by check_workflow_json
+        text = scannable_text(doc, raw)
         rel = wf.relative_to(workflows_dir)
         widget_refs = workflow_widget_refs(doc) if isinstance(doc, dict) else set()
         for ref in sorted(widget_refs):
             name = PurePosixPath(ref).name
+            if name in PLACEHOLDERS:
+                continue  # deliberate empty slot the customer fills in
             if name not in registry:
-                if name not in allow and name not in warned:
-                    warned.add(name)
-                    warnings.append(f"user-supplied (not in registry): {name}  [{rel}]")
+                if name not in allow:
+                    errors.append(
+                        f"{rel}: loader references '{name}', which this template does "
+                        f"not ship. Add it to models_registry.json, or blank the slot "
+                        f"with a placeholder ({sorted(PLACEHOLDERS)[0]}).")
                 continue
             subdir = registry[name].get("subdir") if isinstance(registry[name], dict) else None
             if not subdir:
@@ -242,7 +296,8 @@ def check_coverage(registry: dict, workflows_dir: Path,
         widget_names = {PurePosixPath(r).name for r in widget_refs}
         for m in MODEL_PAT.findall(text):
             name = PurePosixPath(m).name
-            if name in registry or name in allow or name in widget_names or name in warned:
+            if (name in registry or name in allow or name in widget_names
+                    or name in warned or name in PLACEHOLDERS):
                 continue
             warned.add(name)
             warnings.append(f"user-supplied (not in registry): {name}  [{rel}]")

@@ -619,9 +619,10 @@ absent or broken.
 Consumers:
 
 - `start.sh` (§9 step 6): exit 0 adds `--use-sage-attention`; exit 1 or 2 launches without it. The
-  probe prints the message; `start.sh` prints nothing extra. No retry, no source build, no marker
-  files (plan D9: the background subshell, the wait loop, `/tmp/sage_build_done` and the source
-  fallback are all deleted).
+  probe prints the message; `start.sh` relays it at the pre-launch join and prints nothing extra.
+  No retry, no source build (plan D9: the build subshell, the wait loop, `/tmp/sage_build_done` and
+  the source fallback are all deleted). The only files are the two verdict files the install+probe
+  subshell hands the join (E10).
 - `tools/build_sage_wheel.sh` (slice E): runs the probe on the build pod after installing the fresh
   wheel; anything but exit 0 fails the build (plan §5 step 3b).
 - The 0c throwaway-pod check and the paid probe matrix (plan Q5) require exit 0.
@@ -654,10 +655,12 @@ Boot order (donor citations against minimax/wan; architecture.md §3):
 5. `COMFYUI_VERSION` handling: resolve target (`approved` reads `/comfyui-approved-ref`; `latest`
    calls the releases API; explicit ref as-is), compare `git rev-parse HEAD`, move only on mismatch,
    never move on resolve failure (plan §5b).
-6. Sage phase, three synchronous steps, only when `template.json` `"sage": true` (plan D9):
-   read `torch.version.cuda` major ->
+6. Sage phase, only when `template.json` `"sage": true` (plan D9; EXECUTION.md E10): read
+   `torch.version.cuda` major synchronously, then background ONE subshell doing
    `pip install --no-deps --force-reinstall /opt/sage/cu<128|130>/sageattention-*.whl` ->
-   `python3 /comfyui-runtime/src/sage_probe.py`; exit 0 sets `SAGE_FLAG="--use-sage-attention"`.
+   `python3 /comfyui-runtime/src/sage_probe.py`, writing the probe's exit code and message to
+   `/tmp/sage_verdict.rc` / `/tmp/sage_verdict.msg`. The subshell overlaps steps 7 through 14 and
+   is joined in step 15, where exit 0 sets `SAGE_FLAG="--use-sage-attention"`.
 7. CivitAI downloader: baked at `/usr/local/bin/download_with_aria.py` by the base image (donor
    `comfyui-qwen-image/Dockerfile` bake; plan §5c); `start.sh` keeps the git clone ONLY as an
    if-missing fallback for images built before the base exists (today's every-boot clone:
@@ -694,7 +697,10 @@ Boot order (donor citations against minimax/wan; architecture.md §3):
 13. Wait on backgrounded pip installs; onnxruntime CUDA-provider boot re-check and reinstall if
     clobbered (wan `:431-440`; stays per plan §5c: it guards boot-time installs).
 14. `source $TEMPLATE_DIR/src/hooks/pre_launch.sh` if present (§7).
-15. Launch, once, `nohup`ed, never restarted to add a flag (`CLAUDE.md` §6):
+15. Sage join: `wait` on the step 6 subshell, read the verdict files, set `SAGE_FLAG` and record
+    the `sage` / `sage_msg` report keys (a missing verdict fails safe to `probe_failed`). The
+    launch line interpolates `SAGE_FLAG`, so the join MUST precede it. Then launch, once,
+    `nohup`ed, never restarted to add a flag (`CLAUDE.md` §6):
 
     ```
     nohup python3 "$COMFYUI_DIR/main.py" --listen --enable-cors-header '*' \

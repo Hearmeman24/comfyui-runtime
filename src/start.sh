@@ -338,56 +338,65 @@ fi
 # --- derived model paths: end ----------------------------------------------
 
 # ---------------------------------------------------------------------------
-# SageAttention: three synchronous steps (CONTRACTS.md sections 8/9, plan D9).
-# No source build, no background subshell, no marker files, no wheel cache.
-# 1. read torch.version.cuda major  2. install the matching baked wheel
-# 3. run the kernel probe. The probe prints the verdict line; nothing extra.
+# SageAttention (CONTRACTS.md sections 8/9, plan D9; EXECUTION.md E10).
+# The wheel install and the kernel probe run in ONE background subshell so
+# they overlap provisioning and the model downloads instead of serialising
+# ahead of them. The launch line interpolates SAGE_FLAG, so this is NOT
+# fire-and-forget: the subshell writes its verdict (probe exit code and
+# message) to files, and the join immediately above the ComfyUI launch waits
+# on it, reads the verdict and sets SAGE_FLAG. The report_kv sage keys are
+# written at the join, when the verdict exists. No source build, no wheel
+# cache. The wheel is installed --no-deps, so the concurrent custom-node
+# requirement installs never race it on shared packages.
 # ---------------------------------------------------------------------------
 TORCH_CUDA_MAJOR="$(python3 -c 'import torch; print((torch.version.cuda or "").split(".")[0])' 2>/dev/null)"
 report_kv gpu_name "$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1)"
+# --- sage install + probe: begin --------------------------------------------
 SAGE_FLAG=""
+SAGE_JOIN_PID=""
+SAGE_RC_FILE="${SAGE_RC_FILE:-/tmp/sage_verdict.rc}"
+SAGE_MSG_FILE="${SAGE_MSG_FILE:-/tmp/sage_verdict.msg}"
 if [ "$(template_json_get sage)" = "true" ]; then
-    case "$TORCH_CUDA_MAJOR" in
-        12) SAGE_WHEEL_DIR="/opt/sage/cu128" ;;
-        13) SAGE_WHEEL_DIR="/opt/sage/cu130" ;;
-        *)  SAGE_WHEEL_DIR=""
-            echo "⚠️  Unrecognized torch CUDA major '${TORCH_CUDA_MAJOR:-unknown}'. No SageAttention wheel installed."
-            report_warn "Unrecognized torch CUDA major '${TORCH_CUDA_MAJOR:-unknown}'; no SageAttention wheel installed"
-            ;;
-    esac
-    if [ -n "$SAGE_WHEEL_DIR" ]; then
-        SAGE_WHEEL=""
-        for whl in "$SAGE_WHEEL_DIR"/sageattention-*.whl; do
-            [ -e "$whl" ] && SAGE_WHEEL="$whl" && break
-        done
-        if [ -n "$SAGE_WHEEL" ]; then
-            echo "⚡ Installing baked SageAttention wheel: $SAGE_WHEEL"
-            pip install --no-deps --force-reinstall "$SAGE_WHEEL" > /tmp/sage_wheel.log 2>&1 \
-                || { echo "⚠️  SageAttention wheel install failed (see /tmp/sage_wheel.log)."
-                     report_warn "SageAttention wheel install failed (see /tmp/sage_wheel.log)"; }
-        else
-            echo "⚠️  No SageAttention wheel found under $SAGE_WHEEL_DIR."
-            report_warn "No SageAttention wheel found under $SAGE_WHEEL_DIR"
+    rm -f "$SAGE_RC_FILE" "$SAGE_MSG_FILE"
+    (
+        case "$TORCH_CUDA_MAJOR" in
+            12) SAGE_WHEEL_DIR="/opt/sage/cu128" ;;
+            13) SAGE_WHEEL_DIR="/opt/sage/cu130" ;;
+            *)  SAGE_WHEEL_DIR=""
+                echo "⚠️  Unrecognized torch CUDA major '${TORCH_CUDA_MAJOR:-unknown}'. No SageAttention wheel installed."
+                report_warn "Unrecognized torch CUDA major '${TORCH_CUDA_MAJOR:-unknown}'; no SageAttention wheel installed"
+                ;;
+        esac
+        if [ -n "$SAGE_WHEEL_DIR" ]; then
+            SAGE_WHEEL=""
+            for whl in "$SAGE_WHEEL_DIR"/sageattention-*.whl; do
+                [ -e "$whl" ] && SAGE_WHEEL="$whl" && break
+            done
+            if [ -n "$SAGE_WHEEL" ]; then
+                echo "⚡ Installing baked SageAttention wheel in the background: $SAGE_WHEEL"
+                pip install --no-deps --force-reinstall "$SAGE_WHEEL" > /tmp/sage_wheel.log 2>&1 \
+                    || { echo "⚠️  SageAttention wheel install failed (see /tmp/sage_wheel.log)."
+                         report_warn "SageAttention wheel install failed (see /tmp/sage_wheel.log)"; }
+            else
+                echo "⚠️  No SageAttention wheel found under $SAGE_WHEEL_DIR."
+                report_warn "No SageAttention wheel found under $SAGE_WHEEL_DIR"
+            fi
         fi
-    fi
-    # The probe owns the messaging for pass / unsupported arch / failure
-    # (its arch check runs before the sageattention import, so it gives the
-    # right verdict even when the wheel is absent). Its one line is captured
-    # for the deployment report and relayed to the log unchanged.
-    SAGE_PROBE_MSG="$(python3 "$RUNTIME_DIR/src/sage_probe.py")"
-    sage_probe_rc=$?
-    [ -n "$SAGE_PROBE_MSG" ] && echo "$SAGE_PROBE_MSG"
-    report_kv sage_msg "$SAGE_PROBE_MSG"
-    case "$sage_probe_rc" in
-        0) SAGE_FLAG="--use-sage-attention"
-           report_kv sage enabled ;;
-        2) report_kv sage unsupported ;;
-        *) report_kv sage probe_failed ;;
-    esac
+        # The probe owns the messaging for pass / unsupported arch / failure
+        # (its arch check runs before the sageattention import, so it gives
+        # the right verdict even when the wheel is absent). Its one line goes
+        # to the verdict files; the join relays it to the log and report.
+        SAGE_PROBE_MSG="$(python3 "$RUNTIME_DIR/src/sage_probe.py")"
+        sage_probe_rc=$?
+        printf '%s' "$SAGE_PROBE_MSG" > "$SAGE_MSG_FILE"
+        printf '%s' "$sage_probe_rc" > "$SAGE_RC_FILE"
+    ) &
+    SAGE_JOIN_PID=$!
 else
     echo "⏭️  SageAttention disabled for this template (template.json sage != true)."
     report_kv sage off_template
 fi
+# --- sage install + probe: end ----------------------------------------------
 
 # CivitAI downloader: baked at /usr/local/bin by the base image; the clone is
 # ONLY an if-missing fallback for images built before the base exists
@@ -665,6 +674,29 @@ COMFY_EXTRA_ARGS="${COMFY_EXTRA_ARGS:-}"
 if [ -n "$COMFY_EXTRA_ARGS" ]; then
     echo "🧩 Extra ComfyUI args: $COMFY_EXTRA_ARGS"
 fi
+
+# --- sage join: begin --------------------------------------------------------
+# The launch line below interpolates SAGE_FLAG, so the backgrounded sage
+# install + probe MUST be joined here, before the launch, never detached.
+# On a cold pod the model downloads dwarf it and this wait returns
+# immediately; a missing verdict (the subshell died) fails safe to
+# probe_failed and the launch proceeds without the flag.
+if [ -n "$SAGE_JOIN_PID" ]; then
+    wait "$SAGE_JOIN_PID"
+    sage_probe_rc="$(cat "$SAGE_RC_FILE" 2>/dev/null)"
+    SAGE_PROBE_MSG="$(cat "$SAGE_MSG_FILE" 2>/dev/null)"
+    if [ -n "$SAGE_PROBE_MSG" ]; then
+        echo "$SAGE_PROBE_MSG"
+    fi
+    report_kv sage_msg "$SAGE_PROBE_MSG"
+    case "$sage_probe_rc" in
+        0) SAGE_FLAG="--use-sage-attention"
+           report_kv sage enabled ;;
+        2) report_kv sage unsupported ;;
+        *) report_kv sage probe_failed ;;
+    esac
+fi
+# --- sage join: end ----------------------------------------------------------
 
 # Launch ComfyUI ONCE, nohup'ed, never restarted to add a flag. Never pipe
 # the launch to tee while capturing $! (that names tee, not python;

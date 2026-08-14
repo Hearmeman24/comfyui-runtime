@@ -91,10 +91,91 @@ def test_subgraph_walk():
         errors, warnings = vm.check_coverage(reg, wdir)
     check(any("wrong folder prefix" in e and "sub_vae" in e for e in errors),
           "gap 1: prefix error is found inside a subgraph-only workflow")
-    check(any("sub_mystery.safetensors" in w for w in warnings),
-          "gap 1: user-supplied warning is found inside a subgraph-only workflow")
-    check(not any("sub_mystery" in e for e in errors),
-          "severity: a basename absent from the registry is a warning, not an error")
+    check(any("sub_mystery.safetensors" in e for e in errors),
+          "gap 1: the unshipped-model ERROR is found inside a subgraph-only workflow")
+    check(not any("sub_mystery" in w for w in warnings),
+          "severity: a loader naming an unshipped model is an ERROR, not a warning (E13)")
+
+
+# --- E13: the gate that stops a personal LoRA leaking into a workflow ------
+
+def test_unshipped_loader_ref_is_an_error():
+    """The whole point of E13. A loader pointing at something the template
+    does not ship promises a model it never delivers, and that is how 28 dead
+    references accumulated in wan before the 2026-08-14 cull."""
+    reg = {"shipped.safetensors": hf_entry("shipped.safetensors", "loras")}
+    with tempfile.TemporaryDirectory() as tmp:
+        wdir = make_workflows(tmp, {"W.json": wf(
+            top=["shipped.safetensors", "deepthroat_epoch_80.safetensors"])})
+        errors, warnings = vm.check_coverage(reg, wdir)
+    check(any("deepthroat_epoch_80.safetensors" in e and "does not ship" in e
+              for e in errors),
+          "E13: a leaked personal LoRA in a loader is a hard error")
+    check(any("placeholder" in e for e in errors),
+          "E13: the error tells you how to fix it")
+    check(not any("shipped.safetensors" in e for e in errors),
+          "E13: a registered model is untouched")
+
+
+def test_placeholders_are_allowed():
+    """Every shipped workflow has empty LoRA slots on purpose. If those
+    errored, the gate could not be switched on at all."""
+    reg = {"shipped.safetensors": hf_entry("shipped.safetensors", "loras")}
+    with tempfile.TemporaryDirectory() as tmp:
+        wdir = make_workflows(tmp, {"W.json": wf(top=sorted(vm.PLACEHOLDERS))})
+        errors, warnings = vm.check_coverage(reg, wdir)
+    check(not errors, f"E13: placeholders never error (got {errors})")
+    check(not warnings, f"E13: placeholders are not warned about either (got {warnings})")
+
+
+def test_typo_placeholder_still_errors():
+    """An explicit set, not a Your_* prefix match: a near-miss must fail loudly
+    rather than be waved through as 'close enough to a placeholder'."""
+    reg = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        wdir = make_workflows(tmp, {"W.json": wf(
+            top=["Your_Charcter_LoRA_Here.safetensors"])})
+        errors, _ = vm.check_coverage(reg, wdir)
+    check(any("Your_Charcter" in e for e in errors),
+          "E13: a misspelt placeholder is not silently accepted")
+
+
+# --- extra.prompt: an inert API snapshot must not be scanned ---------------
+
+def test_extra_prompt_is_not_scanned():
+    """Comfy-Org ships its LTX-2.5 templates with a stale extra.prompt naming
+    models the live graph does not use. ComfyUI executes doc["nodes"]; this
+    snapshot is never read, so reporting it trains people to ignore warnings."""
+    reg = {"real.safetensors": hf_entry("real.safetensors", "vae")}
+    doc = wf(top=["real.safetensors"])
+    doc["extra"] = {"ds": {"scale": 1},
+                    "prompt": {"1": {"class_type": "CheckpointLoaderSimple",
+                                     "inputs": {"ckpt_name": "ghost_from_an_old_graph.safetensors"}}}}
+    with tempfile.TemporaryDirectory() as tmp:
+        wdir = make_workflows(tmp, {"W.json": doc})
+        errors, warnings = vm.check_coverage(reg, wdir)
+    check(not any("ghost_from_an_old_graph" in m for m in errors + warnings),
+          "extra.prompt is excluded from the raw-text scan")
+    check(not errors, f"a workflow that is fine stays clean (got {errors})")
+
+
+def test_raw_text_scan_still_runs_outside_extra_prompt():
+    """Pruning extra.prompt must not disable the scan. properties.models is
+    exactly where the ltx2 Face-ID metadata bug hid, and it stays warned."""
+    reg = {"real.safetensors": hf_entry("real.safetensors", "vae")}
+    doc = wf(top=["real.safetensors"])
+    doc["nodes"][0]["properties"] = {
+        "models": [{"name": "stale_hint.safetensors", "url": "https://x/y", "directory": "vae"}]}
+    doc["extra"] = {"prompt": {"1": {"inputs": {"ckpt_name": "ghost.safetensors"}}}}
+    with tempfile.TemporaryDirectory() as tmp:
+        wdir = make_workflows(tmp, {"W.json": doc})
+        errors, warnings = vm.check_coverage(reg, wdir)
+    check(any("stale_hint.safetensors" in w for w in warnings),
+          "properties.models is still scanned, at warning level")
+    check(not any("stale_hint" in e for e in errors),
+          "properties.models stays a warning: it is a hint, not what the loader loads")
+    check(not any("ghost" in m for m in errors + warnings),
+          "and extra.prompt is still excluded in the same file")
 
 
 # --- gap 2: the full widget value is compared, prefix included ------------
@@ -367,6 +448,11 @@ def main() -> int:
     tests = [
         test_subgraph_walk,
         test_widget_prefix,
+        test_unshipped_loader_ref_is_an_error,
+        test_placeholders_are_allowed,
+        test_typo_placeholder_still_errors,
+        test_extra_prompt_is_not_scanned,
+        test_raw_text_scan_still_runs_outside_extra_prompt,
         test_gated_tree_api,
         test_renamed_repo_named_in_error,
         test_tree_pagination,

@@ -315,6 +315,16 @@ def provision(args, env) -> int:
     manifest = Path(args.manifest)
 
     flags_map = template.get("flags", {})
+    # Retired flags: still accepted so a saved RunPod template keeps booting,
+    # but they enable nothing and copy nothing. Announced only when the
+    # customer actually has one set, so a clean pod stays quiet.
+    deprecated = template.get("deprecated_flags", {}) or {}
+    retired = frozenset(deprecated)
+    for name in sorted(deprecated):
+        if flag_enabled(env, name, False):
+            print(f"[provisioner] {name} is RETIRED and ships nothing. "
+                  f"{deprecated[name]}")
+    flags_map = {n: c for n, c in flags_map.items() if n not in retired}
     enabled = [n for n, cfg in flags_map.items()
                if flag_enabled(env, n, bool(cfg.get("default")))]
 
@@ -404,6 +414,13 @@ def provision(args, env) -> int:
             queued[b] = entry
     # baked files are never queued (qwen :107-108; CONTRACTS.md section 4).
     queued = {b: e for b, e in queued.items() if not e.get("baked")}
+    # Retired flags ship nothing, in BOTH modes. Filtering here rather than in
+    # select() also closes the walk-mode path, where a retired entry could
+    # otherwise still arrive as an auto_include_with sidecar of a live one.
+    # The env value itself stays accepted: announced above, never an error.
+    if retired:
+        queued = {b: e for b, e in queued.items()
+                  if e.get("flag") not in retired}
 
     lines, skipped = build(queued, models_root)
     manifest.parent.mkdir(parents=True, exist_ok=True)

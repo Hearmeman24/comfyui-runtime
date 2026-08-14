@@ -14,4 +14,15 @@ Hi, this is a template by HearmemanAI.
 3. Once everything is set, click Run and wait for the generation to
    finish.
 
+## JupyterLab and your pod URL
+
+JupyterLab runs on port 8888, and by default it asks for no login. Anyone
+who has your pod URL can open it, reach your files and use the terminal.
+Treat the URL like a password and do not post it in public.
+
+If you want a login, add an environment variable called JUPYTER_TOKEN to
+your pod and set it to any secret text you pick. Restart the pod.
+JupyterLab then asks for that value before it opens. The value is never
+written to the pod log, so your log stays safe to share with support.
+
 {{TEMPLATE_SECTIONS}}

@@ -141,13 +141,47 @@ else
     report_warn "DNS is broken on this pod (RunPod Global Networking enabled?); downloads likely failed"
 fi
 
+# ---------------------------------------------------------------------------
+# JupyterLab. Auth is OPT IN. A pod is reachable at
+# https://<pod-id>-8888.proxy.runpod.net with nothing in front of it, so with
+# no token JupyterLab hands a terminal to anyone holding the URL. Set
+# JUPYTER_TOKEN on the pod and JupyterLab demands it; leave it unset and the
+# command line below is byte for byte what this family has always shipped
+# (note_welcome.md tells the customer exactly that).
+#
+# The token is NEVER passed as an argument and NEVER printed. Jupyter reads it
+# out of its own environment (jupyter_server/auth/identity.py,
+# IdentityProvider._token_default checks os.getenv("JUPYTER_TOKEN") first), so
+# all this has to do is stop overriding it with --NotebookApp.token=''. Off the
+# command line it stays out of `ps` for every other process on the pod, and off
+# stdout it stays out of $NETWORK_VOLUME/comfyui.log, the file support asks
+# customers to paste into Discord (see the tee at the top of this script).
+#
+# The block between the two JUPYTER-LAUNCH markers is extracted and executed by
+# tools/test_jupyter_launch.py. Keep the markers.
+# ---------------------------------------------------------------------------
+# >>> JUPYTER-LAUNCH
+start_jupyter() {
+    local notebook_dir="$1"
+    local -a auth_args
+    if [ -n "${JUPYTER_TOKEN:-}" ]; then
+        auth_args=()
+        echo "🔐 JupyterLab will ask for the value of your JUPYTER_TOKEN variable."
+    else
+        auth_args=(--NotebookApp.token='' --NotebookApp.password='')
+        echo "🔓 JupyterLab has no login: anyone with your pod URL can open it. Set JUPYTER_TOKEN to require a token."
+    fi
+    jupyter-lab --ip=0.0.0.0 --allow-root --no-browser "${auth_args[@]}" --ServerApp.allow_origin='*' --ServerApp.allow_credentials=True --notebook-dir="$notebook_dir" &
+}
+
 if [ "$NETWORK_VOLUME" = "/" ]; then
     echo "NETWORK_VOLUME directory doesn't exist. Starting JupyterLab on root directory..."
-    jupyter-lab --ip=0.0.0.0 --allow-root --no-browser --NotebookApp.token='' --NotebookApp.password='' --ServerApp.allow_origin='*' --ServerApp.allow_credentials=True --notebook-dir=/ &
+    start_jupyter /
 else
     echo "NETWORK_VOLUME directory exists. Starting JupyterLab..."
-    jupyter-lab --ip=0.0.0.0 --allow-root --no-browser --NotebookApp.token='' --NotebookApp.password='' --ServerApp.allow_origin='*' --ServerApp.allow_credentials=True --notebook-dir=/workspace &
+    start_jupyter /workspace
 fi
+# <<< JUPYTER-LAUNCH
 
 # ComfyUI source stays in the image (ephemeral, fast local disk). Models,
 # workflows, outputs, inputs and user-added custom_nodes live on the network

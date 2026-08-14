@@ -114,6 +114,10 @@ TEMPLATE_KEYS = frozenset({
     "template_repo", "branch", "provisioning_mode", "flags", "swap_groups",
     "variant_env", "deprecated_flags", "auto_download", "image_baked",
     "extra_model_paths", "models_symlink", "custom_nodes", "sage",
+    # comfy_extra_args: launch flags this template always needs, start.sh :707.
+    # A per-template workaround for an upstream ComfyUI bug belongs here rather
+    # than in a RunPod form field, so it travels with the repo and is reviewable.
+    "comfy_extra_args",
 })
 # per flag: folders/workflows (walk) and copy (registry) at provisioner.py
 # :199,:206,:221; default :329; extra_models :402. (CONTRACTS.md section 5b)

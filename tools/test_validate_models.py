@@ -422,6 +422,18 @@ def test_template_schema_accepts_entrypoint_keys():
           "E16: template_repo and branch are accepted, not flagged as unknown")
 
 
+def test_template_schema_accepts_comfy_extra_args():
+    """minimax carries --disable-dynamic-vram here to dodge an open upstream
+    bug (Comfy-Org/ComfyUI#15271). If this key ever falls out of the allowlist
+    the template goes red in CI, and the crash it prevents comes straight back."""
+    t = {"provisioning_mode": "walk",
+         "comfy_extra_args": "--disable-dynamic-vram"}
+    check(vm.check_template_schema(t) == [],
+          "E16: comfy_extra_args is an allowed top-level key")
+    check("comfy_extra_args" in vm.TEMPLATE_KEYS,
+          "E16: and it is in TEMPLATE_KEYS, not accepted by accident")
+
+
 def test_template_schema_rejects_unknown_top_level_key():
     """Measured against wan: 'flags' -> 'flag' disables the ENTIRE template and
     still exits 0 everywhere (EXECUTION.md E16)."""
@@ -617,6 +629,7 @@ def main() -> int:
         test_template_checks,
         test_template_schema_accepts_both_real_shapes,
         test_template_schema_accepts_entrypoint_keys,
+        test_template_schema_accepts_comfy_extra_args,
         test_template_schema_rejects_unknown_top_level_key,
         test_template_schema_rejects_unknown_flag_key,
         test_template_schema_rejects_unknown_swap_group_and_profile_shape,

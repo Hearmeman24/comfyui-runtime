@@ -25,6 +25,13 @@ Offline checks (always run):
      entries must exist ("folders" that are missing only warn, matching the
      provisioner, comfyui-wan/src/workflow_provisioner.py:79-81); every
      swap-group profile filename must be a registry key (CONTRACTS.md 5a).
+  4a. template.json schema: a strict key allowlist at every level. Every read
+     of template.json is a .get() with a default, so an unknown key is
+     indistinguishable from an absent one and a typo is silent: measured
+     against wan, "folders" -> "folder" copies ZERO workflows, "flags" ->
+     "flag" disables the whole template, "extra_models" -> "extra_model"
+     drops a model, and all three exit 0 from the provisioner AND from this
+     validator (EXECUTION.md E16). Unknown key -> HARD ERROR.
 
 Network checks (skipped with --offline). Never a bare HEAD:
   5. Registry existence.
@@ -87,6 +94,36 @@ PLACEHOLDERS = frozenset({
     "Your_LoRA_Here_HIGH_NOISE.safetensors",
     "Your_LoRA_Here_LOW_NOISE.safetensors",
 })
+# ------------------------------------------------ template.json allowlist ---
+# Derived from what the code actually READS, then confirmed against
+# CONTRACTS.md section 5 prose (E16: derive from code, treat section 5 as the
+# description of it; section 5's markdown mixes nested keys and example values
+# into one block and is not a flat top-level list).
+#
+#   top level      src/start.sh template_json_get: models_symlink :161,
+#                  extra_model_paths :315, sage :359, custom_nodes.target :425,
+#                  custom_nodes.repos :437; src/provisioner.py template.get:
+#                  swap_groups :139, provisioning_mode :306, flags :317,
+#                  deprecated_flags :321, variant_env :368, auto_download :387,
+#                  image_baked :388.
+#   template_repo / branch are the entrypoint's clone target (CONTRACTS.md
+#                  section 5) and are read outside this runtime, so a scan of
+#                  runtime code alone misses them. All four live templates
+#                  carry both; omitting them here turns all four red.
+TEMPLATE_KEYS = frozenset({
+    "template_repo", "branch", "provisioning_mode", "flags", "swap_groups",
+    "variant_env", "deprecated_flags", "auto_download", "image_baked",
+    "extra_model_paths", "models_symlink", "custom_nodes", "sage",
+})
+# per flag: folders/workflows (walk) and copy (registry) at provisioner.py
+# :199,:206,:221; default :329; extra_models :402. (CONTRACTS.md section 5b)
+FLAG_KEYS = frozenset({"folders", "workflows", "copy", "default", "extra_models"})
+# per swap group: profiles :140, flags :142, default :144, env :146.
+# (CONTRACTS.md section 5a)
+SWAP_GROUP_KEYS = frozenset({"env", "default", "flags", "profiles"})
+# custom_nodes: start.sh :425,:437.
+CUSTOM_NODES_KEYS = frozenset({"target", "repos"})
+
 # https://huggingface.co/<owner>/<repo>/resolve/<rev>/<path/in/repo>
 HF_RESOLVE_RE = re.compile(
     r"^https?://huggingface\.co/(?P<repo>[^/]+/[^/]+)/resolve/(?P<rev>[^/]+)/(?P<file>.+?)(?:\?.*)?$")
@@ -304,6 +341,73 @@ def check_coverage(registry: dict, workflows_dir: Path,
     return errors, warnings
 
 
+def _unknown_keys(where: str, obj: dict, allowed: frozenset) -> list[str]:
+    return [f"template.json: unknown key '{k}' in {where}. Allowed: "
+            f"{', '.join(sorted(allowed))}"
+            for k in sorted(obj) if k not in allowed]
+
+
+def check_template_schema(template: dict) -> list[str]:
+    """Strict key allowlist for template.json, at every level (E16).
+
+    Nothing else validates this file: the runtime reads it entirely through
+    .get() with defaults, so a mistyped key is silently an absent key and the
+    pod boots wrong while CI stays green. Unknown key -> error.
+
+    The trade this makes on purpose: a template that adds a key BEFORE the
+    runtime learns it goes red. So the ordering is runtime-first — teach the
+    allowlist here, promote `stable`, then use the key in a template.
+
+    Profile role names are template-defined and cannot be allowlisted; the
+    per-profile rule is that a profile maps roles to filename STRINGS, since
+    anything else reaches provisioner.build_swap_state as a registry lookup.
+    """
+    if not isinstance(template, dict):
+        return ["template.json: must be a JSON object"]
+    errors = _unknown_keys("the top level", template, TEMPLATE_KEYS)
+
+    flags = template.get("flags")
+    if flags is not None and not isinstance(flags, dict):
+        errors.append("template.json: 'flags' must be an object")
+    elif isinstance(flags, dict):
+        for name, cfg in flags.items():
+            if isinstance(cfg, dict):  # non-dict is reported by check_template
+                errors += _unknown_keys(f"flag '{name}'", cfg, FLAG_KEYS)
+
+    nodes = template.get("custom_nodes")
+    if nodes is not None and not isinstance(nodes, dict):
+        errors.append("template.json: 'custom_nodes' must be an object")
+    elif isinstance(nodes, dict):
+        errors += _unknown_keys("custom_nodes", nodes, CUSTOM_NODES_KEYS)
+
+    groups = template.get("swap_groups")
+    if groups is not None and not isinstance(groups, list):
+        errors.append("template.json: 'swap_groups' must be a list")
+        groups = []
+    for group in groups or []:
+        if not isinstance(group, dict):
+            errors.append("template.json: every swap group must be an object")
+            continue
+        env = group.get("env", "?")
+        errors += _unknown_keys(f"swap group '{env}'", group, SWAP_GROUP_KEYS)
+        profiles = group.get("profiles")
+        if profiles is not None and not isinstance(profiles, dict):
+            errors.append(f"template.json: swap group '{env}': "
+                          f"'profiles' must be an object")
+            continue
+        for pname, profile in (profiles or {}).items():
+            if not isinstance(profile, dict):
+                errors.append(f"template.json: swap group '{env}' profile "
+                              f"'{pname}' must be an object of role -> filename")
+                continue
+            for role, fname in profile.items():
+                if not isinstance(fname, str):
+                    errors.append(
+                        f"template.json: swap group '{env}' profile '{pname}' "
+                        f"role '{role}' must be a filename string")
+    return errors
+
+
 def check_template(template: dict, registry: dict,
                    workflows_dir: Path) -> tuple[list[str], list[str]]:
     """(errors, warnings) for template.json cross-references."""
@@ -360,6 +464,20 @@ def _size_check(name: str, entry: dict, size, registry: dict):
                   f"on every boot)")
 
 
+def redact(url: str) -> str:
+    """Drop a URL's query string before it reaches an error message.
+
+    The non-HF branch below is the presigned R2/S3 path, and a presigned URL
+    carries a LIVE signature in its query string (X-Amz-Signature=...). These
+    messages are printed by main() straight into CircleCI job output, so a
+    failing check would publish a working credential to everyone with access
+    to the build. Host and path are what make the error useful; the query
+    string is not.
+    """
+    head, sep, _ = url.partition("?")
+    return head + ("?<redacted>" if sep else "")
+
+
 def check_url(name: str, entry: dict, registry: dict):
     """(error, warning) for one registry entry's URL. Never issues a HEAD."""
     url = entry["url"]
@@ -384,7 +502,9 @@ def check_url(name: str, entry: dict, registry: dict):
     try:
         status, headers, _, _ = http_request(url, range_first_byte=True)
     except Exception as e:  # noqa: BLE001
-        return f"{name}: {e} - {url}", None
+        # Some transport errors quote the URL back in their own message, so
+        # the exception text is a leak channel too.
+        return f"{name}: {str(e).replace(url, redact(url))} - {redact(url)}", None
     if status == 206:
         cr = re.match(r"bytes\s+\d+-\d+/(\d+)", headers.get("Content-Range", ""))
         size = int(cr.group(1)) if cr else None
@@ -392,7 +512,7 @@ def check_url(name: str, entry: dict, registry: dict):
         cl = headers.get("Content-Length", "")
         size = int(cl) if cl.isdigit() else None
     else:
-        return f"{name}: HTTP {status} on ranged GET - {url}", None
+        return f"{name}: HTTP {status} on ranged GET - {redact(url)}", None
     return _size_check(name, entry, size, registry)
 
 
@@ -441,6 +561,7 @@ def run(registry_path, workflows_dir, template_path=None, offline=False) -> int:
     cov_errors, warnings = check_coverage(registry, workflows_dir, allow)
     errors += cov_errors
     if template is not None:
+        errors += check_template_schema(template)
         tpl_errors, tpl_warnings = check_template(template, registry, workflows_dir)
         errors += tpl_errors
         warnings += tpl_warnings

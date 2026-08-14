@@ -359,6 +359,11 @@ def test_three_notes_written_as_markdownnote_workflows():
         ok("discord.gg" in welcome, welcome)
         ok("Workflows" in welcome and "Run" in welcome, welcome)
         ok("Load Image" in welcome and "Load Video" in welcome, welcome)
+        # JupyterLab auth is opt in, so the welcome note carries BOTH states:
+        # what an unset JUPYTER_TOKEN means for a pod URL anyone can reach,
+        # and how to turn a login on.
+        ok("JUPYTER_TOKEN" in welcome, welcome)
+        ok("do not post it in public" in welcome, welcome)
 
         # Adding models: the CivitAI guide with the canonical variables and
         # the LoRA wget how-to with the real on-pod path.

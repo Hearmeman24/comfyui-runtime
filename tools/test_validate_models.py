@@ -368,6 +368,160 @@ def test_template_checks():
           "template: a swap profile filename absent from the registry is an error")
 
 
+# --- E16: the template.json key allowlist -----------------------------------
+
+def valid_template(mode="walk"):
+    """A template of each real shape, exercising every allowed key."""
+    if mode == "walk":
+        return {
+            "template_repo": "https://github.com/Hearmeman24/comfyui-wan.git",
+            "branch": "master",
+            "provisioning_mode": "walk",
+            "flags": {"download_wan21": {"folders": ["Wan 2.1"],
+                                         "extra_models": ["rife426.pth"],
+                                         "default": True},
+                      "DOWNLOAD_QWEN_IMAGE": {"workflows": ["Q.json"]}},
+            "swap_groups": [{"env": "minimax_quant", "default": "int8",
+                             "flags": ["download_wan21"],
+                             "profiles": {"int8": {"dit": "a.safetensors"},
+                                          "fp8": {"dit": "b.safetensors"}}}],
+            "variant_env": "lightweight_fp8",
+            "deprecated_flags": {"download_old": "use download_wan21 instead."},
+            "auto_download": ["rife49.pth"],
+            "image_baked": ["4xLSDIR.pth"],
+            "extra_model_paths": ["vae_approx"],
+            "models_symlink": False,
+            "custom_nodes": {"target": "image", "repos": ["https://x/y.git|abc"]},
+            "sage": True,
+        }
+    return {
+        "template_repo": "https://github.com/Hearmeman24/comfyui-ltx2.git",
+        "branch": "main",
+        "provisioning_mode": "registry",
+        "flags": {"download_ltx23": {"copy": ["."], "default": True}},
+        "custom_nodes": {"target": "volume", "repos": []},
+        "sage": True,
+    }
+
+
+def test_template_schema_accepts_both_real_shapes():
+    check(vm.check_template_schema(valid_template("walk")) == [],
+          "E16: a valid walk-mode template with every allowed key passes")
+    check(vm.check_template_schema(valid_template("registry")) == [],
+          "E16: a valid registry-mode template passes")
+
+
+def test_template_schema_accepts_entrypoint_keys():
+    """template_repo and branch are read by the template's baked
+    start_script.sh, not by the runtime, so deriving the allowlist from a scan
+    of runtime code alone would turn all four templates red."""
+    t = {"provisioning_mode": "walk",
+         "template_repo": "https://github.com/Hearmeman24/comfyui-wan.git",
+         "branch": "master"}
+    check(vm.check_template_schema(t) == [],
+          "E16: template_repo and branch are accepted, not flagged as unknown")
+
+
+def test_template_schema_rejects_unknown_top_level_key():
+    """Measured against wan: 'flags' -> 'flag' disables the ENTIRE template and
+    still exits 0 everywhere (EXECUTION.md E16)."""
+    t = valid_template("walk")
+    t["flag"] = t.pop("flags")
+    errors = vm.check_template_schema(t)
+    check(any("unknown key 'flag'" in e and "top level" in e for e in errors),
+          "E16: an unknown top-level key errors and is named")
+    t2 = dict(valid_template("walk"), auto_downloads=["x.pth"])
+    check(any("unknown key 'auto_downloads'" in e
+              for e in vm.check_template_schema(t2)),
+          "E16: 'auto_download' -> 'auto_downloads' is caught by name, not by "
+          "8 errors that blame the workflows")
+
+
+def test_template_schema_rejects_unknown_flag_key():
+    """'folders' -> 'folder' copies zero workflows: the customer enables a flag,
+    pays for a GPU and gets an empty ComfyUI."""
+    t = valid_template("walk")
+    t["flags"]["download_wan21"]["folder"] = t["flags"]["download_wan21"].pop("folders")
+    errors = vm.check_template_schema(t)
+    check(any("unknown key 'folder'" in e and "flag 'download_wan21'" in e
+              for e in errors),
+          "E16: an unknown per-flag key errors and names the flag")
+    t2 = valid_template("walk")
+    t2["flags"]["download_wan21"]["extra_model"] = \
+        t2["flags"]["download_wan21"].pop("extra_models")
+    check(any("unknown key 'extra_model'" in e for e in vm.check_template_schema(t2)),
+          "E16: 'extra_models' -> 'extra_model' no longer drops a model silently")
+
+
+def test_template_schema_rejects_unknown_swap_group_and_profile_shape():
+    t = valid_template("walk")
+    t["swap_groups"][0]["profile"] = t["swap_groups"][0].pop("profiles")
+    errors = vm.check_template_schema(t)
+    check(any("unknown key 'profile'" in e and "swap group 'minimax_quant'" in e
+              for e in errors),
+          "E16: an unknown swap-group key errors and names the group")
+    t2 = valid_template("walk")
+    t2["swap_groups"][0]["profiles"]["int8"]["dit"] = ["a.safetensors"]
+    check(any("role 'dit' must be a filename string" in e
+              for e in vm.check_template_schema(t2)),
+          "E16: a profile role must map to a filename string, not a container")
+    t3 = valid_template("walk")
+    t3["custom_nodes"]["repo"] = t3["custom_nodes"].pop("repos")
+    check(any("unknown key 'repo'" in e and "custom_nodes" in e
+              for e in vm.check_template_schema(t3)),
+          "E16: an unknown key inside custom_nodes errors")
+
+
+def test_template_schema_runs_in_the_gate():
+    """The allowlist must fire through run(), not just as a library call:
+    that is the only path CI takes."""
+    def boom(url, range_first_byte=False):
+        raise AssertionError(f"network call in offline mode: {url}")
+    vm.http_request = boom
+    with tempfile.TemporaryDirectory() as tmp:
+        reg_path = Path(tmp) / "models_registry.json"
+        reg_path.write_text(json.dumps({}))
+        wdir = make_workflows(tmp, {"Good.json": wf(top=[])})
+        tpl = Path(tmp) / "template.json"
+        tpl.write_text(json.dumps({"provisioning_mode": "walk", "flags": {},
+                                   "template_repo": "x", "branch": "master"}))
+        rc = vm.run(reg_path, wdir, template_path=tpl, offline=True)
+        check(rc == 0, "E16: a schema-clean template still exits 0 through run()")
+        tpl.write_text(json.dumps({"provisioning_mode": "walk", "flag": {},
+                                   "template_repo": "x", "branch": "master"}))
+        rc = vm.run(reg_path, wdir, template_path=tpl, offline=True)
+        check(rc == 1, "E16: a typo'd template.json key exits 1 through run()")
+
+
+# --- credential redaction in error strings ----------------------------------
+
+def test_presigned_url_is_redacted_in_errors():
+    """A presigned R2/S3 URL carries a live signature in its query string, and
+    these messages go straight into CircleCI job output."""
+    sig = "X-Amz-Signature=deadbeefliveCREDENTIAL"
+    url = f"https://r2.example.com/private/client_lora.safetensors?{sig}"
+    reg = {"client_lora.safetensors": {"url": url, "subdir": "loras"}}
+
+    fake = FakeNet()
+    vm.http_request = fake
+    fake.add(url, 403, {}, b"")
+    errors, _ = vm.check_urls(reg)
+    check(errors and not any(sig in e or "X-Amz" in e for e in errors),
+          "redaction: a failed ranged GET never prints the signature")
+    check(any("https://r2.example.com/private/client_lora.safetensors" in e
+              for e in errors),
+          "redaction: host and path survive, which is what makes the error useful")
+
+    def raiser(u, range_first_byte=False):
+        raise RuntimeError(f"connection reset while fetching {u}")
+    vm.http_request = raiser
+    errors, _ = vm.check_urls(reg)
+    check(errors and not any(sig in e for e in errors),
+          "redaction: a transport error that quotes the URL back is redacted too")
+    check(vm.redact("https://x/y.safetensors") == "https://x/y.safetensors",
+          "redaction: a URL with no query string is unchanged")
+
+
 def test_allowlists_suppress_warnings():
     with tempfile.TemporaryDirectory() as tmp:
         wdir = make_workflows(tmp, {"W.json": wf(top=["rife49.pth", "4xLSDIR.pth"])})
@@ -461,6 +615,13 @@ def main() -> int:
         test_dest_subdir_rejected,
         test_baked_skips_network,
         test_template_checks,
+        test_template_schema_accepts_both_real_shapes,
+        test_template_schema_accepts_entrypoint_keys,
+        test_template_schema_rejects_unknown_top_level_key,
+        test_template_schema_rejects_unknown_flag_key,
+        test_template_schema_rejects_unknown_swap_group_and_profile_shape,
+        test_template_schema_runs_in_the_gate,
+        test_presigned_url_is_redacted_in_errors,
         test_allowlists_suppress_warnings,
         test_offline_and_exit_codes,
         test_prose_is_not_a_filename,

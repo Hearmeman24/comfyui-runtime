@@ -698,16 +698,38 @@ then
     report_kv volume_sync running
 fi
 
-# Per-pod escape hatch for upstream ComfyUI bugs. Anything in
-# COMFY_EXTRA_ARGS is appended to the launch verbatim and word-split on
-# purpose, so a customer can pass several flags without us cutting a tag.
-# Known use today: --disable-dynamic-vram, which works around
+# --- comfy extra args: begin -------------------------------------------------
+# Extra launch flags, from two sources, concatenated in this order:
+#
+#   1. template.json "comfy_extra_args" — flags this template ALWAYS needs,
+#      typically a workaround for an upstream ComfyUI bug that only bites this
+#      model family. Lives in the repo so it is reviewable and travels with a
+#      plain `docker run`, unlike a RunPod form field a customer can delete.
+#   2. COMFY_EXTRA_ARGS — the per-pod escape hatch, unchanged.
+#
+# Both are word-split on purpose so either can carry several flags without us
+# cutting a tag. The customer's flags come LAST so they win: argparse takes the
+# later value, and for the dynamic-VRAM pair specifically, cli_args.py's
+# enables_dynamic_vram() early-returns True on --enable-dynamic-vram, so a
+# customer can always put a template default back.
+#
+# Known use today: minimax sets --disable-dynamic-vram, working around
 # Comfy-Org/ComfyUI#15271 (illegal memory access in the AIMDO vbar prefetch
-# path, MiniMax M3). See the triage block below.
+# path, MiniMax int8). Still open upstream. See the triage block below.
+TEMPLATE_COMFY_ARGS="$(template_json_get comfy_extra_args)"
 COMFY_EXTRA_ARGS="${COMFY_EXTRA_ARGS:-}"
+if [ -n "$TEMPLATE_COMFY_ARGS" ]; then
+    echo "🧩 Template ComfyUI args: $TEMPLATE_COMFY_ARGS"
+fi
 if [ -n "$COMFY_EXTRA_ARGS" ]; then
     echo "🧩 Extra ComfyUI args: $COMFY_EXTRA_ARGS"
 fi
+# Plain concatenation, no xargs: the launch expands this unquoted and word-
+# splits it (see the shellcheck disable on the nohup line), so surrounding and
+# repeated whitespace collapses on its own. xargs would additionally interpret
+# quotes and backslashes, which is not what a flag string means here.
+COMFY_EXTRA_ARGS="$TEMPLATE_COMFY_ARGS $COMFY_EXTRA_ARGS"
+# --- comfy extra args: end ---------------------------------------------------
 
 # --- sage join: begin --------------------------------------------------------
 # The launch line below interpolates SAGE_FLAG, so the backgrounded sage

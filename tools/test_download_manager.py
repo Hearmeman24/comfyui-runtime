@@ -11,6 +11,7 @@ import contextlib
 import io
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -63,10 +64,19 @@ dm.SNAPSHOT_INTERVAL = 0.05  # keep the pool loop fast under test
 # ---------------------------------------------------------------------------
 SUB_CALLS: list[list] = []
 SUB_SIZE = [32 * 1024]
+SUB_FAIL = {"exit_code": 0}  # non-zero makes every child downloader fail
 
 
-def fake_subprocess_run(cmd, check=True):
+def fake_subprocess_run(cmd, check=False):
+    # check defaults to False, exactly like subprocess.run: a caller that opts
+    # into check=True gets the real CalledProcessError, whose __str__ carries
+    # the whole argv including the URL. That is the leak test_error_redaction
+    # guards against.
     SUB_CALLS.append(list(cmd))
+    if SUB_FAIL["exit_code"]:
+        if check:
+            raise subprocess.CalledProcessError(SUB_FAIL["exit_code"], cmd)
+        return types.SimpleNamespace(returncode=SUB_FAIL["exit_code"])
     if cmd[0] == "aria2c":
         out = Path(cmd[cmd.index("-d") + 1]) / cmd[cmd.index("-o") + 1]
     elif cmd[0] == "gdown":
@@ -80,10 +90,45 @@ def fake_subprocess_run(cmd, check=True):
 
 dm.subprocess = types.SimpleNamespace(run=fake_subprocess_run)
 
+# ---------------------------------------------------------------------------
+# Stub the ranged-GET size probe (non-HF URLs). No network.
+# ---------------------------------------------------------------------------
+PROBE_CALLS: list[dict] = []
+PROBE = {"size": 32 * 1024, "status": 206, "raise": None}
+
+
+class FakeResponse:
+    def __init__(self, headers, status):
+        self.headers = headers
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def fake_urlopen(req, timeout=None):
+    PROBE_CALLS.append({"url": req.full_url, "method": req.get_method(),
+                        "range": req.headers.get("Range"), "timeout": timeout})
+    if PROBE["raise"] is not None:
+        raise PROBE["raise"]
+    if PROBE["status"] == 206:
+        return FakeResponse({"Content-Range": f"bytes 0-0/{PROBE['size']}"}, 206)
+    return FakeResponse({"Content-Length": str(PROBE["size"])}, 200)
+
+
+dm.urlopen = fake_urlopen
+
 
 def reset_calls():
     HF_CALLS.clear()
     SUB_CALLS.clear()
+    PROBE_CALLS.clear()
+    SUB_FAIL["exit_code"] = 0
+    PROBE.update({"size": 32 * 1024, "status": 206, "raise": None})
+    dm.reset_reservations()
 
 
 def run_main(manifest_path) -> tuple[int, str]:
@@ -209,13 +254,28 @@ def test_happy_path(tmp):
     gdown = [c for c in SUB_CALLS if c[0] == "gdown"]
     assert len(gdown) == 1 and "-O" in gdown[0]
 
+    # The aria2c entry is sized by a ranged GET, never a HEAD: a presigned R2
+    # URL is signed for GET and 403s a HEAD.
+    assert len(PROBE_CALLS) == 1, f"expected one size probe, got {PROBE_CALLS}"
+    assert PROBE_CALLS[0]["url"] == "https://example.com/thing.bin"
+    assert PROBE_CALLS[0]["method"] == "GET"
+    assert PROBE_CALLS[0]["range"] == "bytes=0-0"
+    assert PROBE_CALLS[0]["timeout"] == dm.SIZE_PROBE_TIMEOUT, \
+        "the probe must be bounded so a dead host cannot hold the boot"
+
     # NVMe-first: the stage is NOT cleaned here. The staged file IS the model
-    # until volume_sync.py copies it across and unlinks it. Every dest is a
+    # until volume_sync.py copies it across and unlinks it. A sized entry is a
     # symlink into the stage at this point.
-    for name, dest in dests.items():
+    for name in ("hf", "direct"):
+        dest = dests[name]
         assert dest.is_symlink(), f"{name} dest must be a symlink into the stage"
         assert Path(os.readlink(dest)).is_file(), \
             f"{name} symlink target must still exist in the stage"
+    # Drive is not probed (a plain GET returns an HTML confirm page, not the
+    # file), so it stays size-unknown and lands the slow, safe way.
+    gd = dests["gdrive"]
+    assert not gd.is_symlink() and gd.is_file(), \
+        "an unsized gdrive entry must stage on the volume, not the local disk"
     del os.environ["HF_TOKEN"]
     print("ok: happy path (hf + aria2c + gdown), atomic symlink publish")
 
@@ -265,6 +325,7 @@ def test_floor_failure(tmp):
 
 def test_stage_fallback(tmp):
     dm.LOCAL_STAGE = tmp / "hf_stage"
+    dm.reset_reservations()
     job = dm.Job(url="u", dest=tmp / "models" / "big.safetensors", kind="hf")
     job.total_bytes = 10 * 1024 ** 3
     real_du = dm.shutil.disk_usage
@@ -283,7 +344,179 @@ def test_stage_fallback(tmp):
             "with 2.5x headroom the local disk must be used"
     finally:
         dm.shutil.disk_usage = real_du
+        dm.reset_reservations()
     print("ok: 2.5x headroom check picks local disk vs volume fallback")
+
+
+def test_direct_headroom(tmp):
+    """BUG 1: the 2.5x guard must apply to aria2c and gdown entries too.
+
+    fetch_sizes only ever ran for kind == "hf", so every direct/gdrive job kept
+    total_bytes == 0 and pick_stage_dir's `not job.total_bytes` branch sent it
+    to the local disk unconditionally - the exact entries (presigned R2,
+    CivitAI) that run to tens of GB, CONTRACTS.md:85-87.
+    """
+    reset_calls()
+    dm.LOCAL_STAGE = tmp / "hf_stage"
+    real_du = dm.shutil.disk_usage
+    buf = io.StringIO()
+    try:
+        # 40 GB free, a 25 GB presigned object: 62.5 GB needed, so no.
+        dm.shutil.disk_usage = lambda p: types.SimpleNamespace(free=40 * 1024 ** 3)
+        direct = dm.Job(url="https://r2.example.com/x.safetensors?X-Amz-Signature=deadbeef",
+                        dest=tmp / "models" / "x.safetensors", kind="direct")
+        PROBE["size"] = 25 * 1024 ** 3
+        with contextlib.redirect_stdout(buf):
+            dm.fetch_direct_sizes([direct])
+            stage = dm.pick_stage_dir(direct)
+        assert direct.total_bytes == 25 * 1024 ** 3, \
+            "a direct entry must be sized by the ranged GET"
+        assert stage == direct.dest.parent / ".hf_stage" / direct.dest.name, \
+            "a 25 GB direct entry must not stage on a 40 GB disk"
+        assert "?X-Amz-Signature" not in buf.getvalue(), \
+            "the staging decision must not echo a presigned query string"
+
+        # Probe fails (403, DNS, anything): unknown size now means the volume,
+        # not a free pass onto the local disk.
+        unknown = dm.Job(url="https://r2.example.com/y.safetensors",
+                         dest=tmp / "models" / "y.safetensors", kind="direct")
+        PROBE["raise"] = OSError("403 forbidden")
+        dm.shutil.disk_usage = lambda p: types.SimpleNamespace(free=10 ** 15)
+        with contextlib.redirect_stdout(buf):
+            dm.fetch_direct_sizes([unknown])
+            stage = dm.pick_stage_dir(unknown)
+        assert unknown.total_bytes == 0
+        assert stage == unknown.dest.parent / ".hf_stage" / unknown.dest.name, \
+            "an unsized entry must stage on the volume even with room to spare"
+
+        # A server that ignores Range answers 200; Content-Length is then the
+        # whole file, and a small one still takes the fast path.
+        PROBE["raise"] = None
+        PROBE["status"] = 200
+        PROBE["size"] = 4 * 1024 ** 2
+        small = dm.Job(url="https://example.com/small.pth",
+                       dest=tmp / "models" / "small.pth", kind="direct")
+        with contextlib.redirect_stdout(buf):
+            dm.fetch_direct_sizes([small])
+            stage = dm.pick_stage_dir(small)
+        assert small.total_bytes == 4 * 1024 ** 2, "200 must fall back to Content-Length"
+        assert stage == dm.LOCAL_STAGE / small.dest.name
+    finally:
+        dm.shutil.disk_usage = real_du
+        dm.reset_reservations()
+    print("ok: the 2.5x headroom guard covers direct entries; unsized ones use the volume")
+
+
+def test_stage_reservation(tmp):
+    """BUG 2: concurrent pick_stage_dir calls must not each spend the same disk.
+
+    Deterministic by construction rather than by timing: with a FIXED stubbed
+    free space, only one of three identical jobs can fit, so whatever order the
+    threads win in, the outcome is exactly 1 local + 2 volume. Without the
+    reservation all three read the same disk_usage() and all three go local.
+    """
+    dm.LOCAL_STAGE = tmp / "hf_stage"
+    dm.reset_reservations()
+    lock = threading.Lock()
+    real_du = dm.shutil.disk_usage
+    # 100 GB free, three 30 GB models: 75 GB needed each, so exactly one fits.
+    dm.shutil.disk_usage = lambda p: types.SimpleNamespace(free=100 * 1024 ** 3)
+    jobs = [dm.Job(url="u", dest=tmp / "models" / f"m{i}.safetensors", kind="hf")
+            for i in range(dm.POOL_SIZE)]
+    for j in jobs:
+        j.total_bytes = 30 * 1024 ** 3
+    picks: dict = {}
+    ready = threading.Barrier(dm.POOL_SIZE)
+    buf = io.StringIO()
+
+    def worker(job):
+        ready.wait()
+        picks[job.dest.name] = dm.pick_stage_dir(job, lock)
+
+    try:
+        with contextlib.redirect_stdout(buf):
+            threads = [threading.Thread(target=worker, args=(j,)) for j in jobs]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        local = [n for n, p in picks.items() if p == dm.LOCAL_STAGE / n]
+        volume = [n for n, p in picks.items() if p != dm.LOCAL_STAGE / n]
+        assert len(picks) == dm.POOL_SIZE
+        assert len(local) == 1, \
+            f"three 30 GB jobs on a 100 GB disk: exactly one may stage locally, got {picks}"
+        assert len(volume) == 2, f"the other two must fall back to the volume, got {picks}"
+        assert dm._local_reserved == 30 * 1024 ** 3, \
+            "the winner's bytes must stay reserved while it is in flight"
+        assert "already committed" in buf.getvalue(), \
+            "a caller losing to a reservation must say so"
+
+        # Releasing gives the budget back, so a later job can use the disk.
+        for j in jobs:
+            dm.release_reservation(j, lock)
+        assert dm._local_reserved == 0
+        later = dm.Job(url="u", dest=tmp / "models" / "late.safetensors", kind="hf")
+        later.total_bytes = 30 * 1024 ** 3
+        with contextlib.redirect_stdout(buf):
+            assert dm.pick_stage_dir(later, lock) == dm.LOCAL_STAGE / later.dest.name, \
+                "a released reservation must return the budget"
+    finally:
+        dm.shutil.disk_usage = real_du
+        dm.reset_reservations()
+    print("ok: local-stage reservations serialise the headroom decision")
+
+
+SIGNED_URL = ("https://acct.r2.cloudflarestorage.com/bucket/client.safetensors"
+              "?X-Amz-Credential=AKIAEXAMPLE&X-Amz-Signature=c0ffee0123456789")
+
+
+def test_error_redaction(tmp):
+    """BUG 3: a failed download must not print its URL's query string.
+
+    All boot stdout is teed to $NETWORK_VOLUME/comfyui.log (src/start.sh:115),
+    the file the triage block tells a customer to paste into Discord. A
+    presigned R2 signature must not be in it.
+    """
+    import json
+    reset_calls()
+    dm.LOCAL_STAGE = tmp / "hf_stage"
+    SUB_FAIL["exit_code"] = 22
+    status_path = tmp / "hf_status.json"
+    os.environ["HF_STATUS_FILE"] = str(status_path)
+    dest = tmp / "models" / "loras" / "client.safetensors"
+    man = tmp / "m.tsv"
+    man.write_text(f"{SIGNED_URL}\t{dest}\t0.01\n")
+    try:
+        rc, out = run_main(man)
+    finally:
+        del os.environ["HF_STATUS_FILE"]
+        SUB_FAIL["exit_code"] = 0
+
+    assert rc == 1, f"a failed aria2c entry must fail the run, got {rc}"
+    for needle in ("X-Amz-Signature", "c0ffee0123456789", "X-Amz-Credential",
+                   "AKIAEXAMPLE"):
+        assert needle not in out, f"{needle} leaked into the boot log:\n{out}"
+    assert "exited 22" in out, f"the exit code must survive redaction:\n{out}"
+    assert "acct.r2.cloudflarestorage.com/bucket/client.safetensors" in out, \
+        f"host and path must survive redaction:\n{out}"
+
+    status = json.loads(status_path.read_text())
+    entry = status["client.safetensors"]
+    blob = json.dumps(status)
+    for needle in ("X-Amz-Signature", "c0ffee0123456789", "AKIAEXAMPLE"):
+        assert needle not in blob, f"{needle} leaked into the status file:\n{blob}"
+    assert entry["status"] == "failed"
+    assert "exited 22" in entry["error"]
+    assert entry["url"] == ("https://acct.r2.cloudflarestorage.com/bucket/"
+                            "client.safetensors"), entry
+
+    # The scrubber also covers messages we did not format: a child's stderr or
+    # huggingface_hub echoing the URL it was handed.
+    scrubbed = dm.scrub_urls(f"aria2c: download failed for {SIGNED_URL} (403)")
+    assert "X-Amz-Signature" not in scrubbed and "403" in scrubbed, scrubbed
+    assert dm.redact_url("https://user:pw@host.example.com:8443/a/b?x=1") == \
+        "https://host.example.com:8443/a/b", "userinfo must go too"
+    print("ok: a failed download logs exit code + host/path, never the signature")
 
 
 def test_status_file(tmp):
@@ -583,7 +816,9 @@ def main() -> int:
     test_env_timeouts()
     for test in (test_parse_manifest, test_exit_codes, test_happy_path,
                  test_skip_and_refetch, test_floor_failure,
-                 test_stage_fallback, test_status_file, test_watchdog,
+                 test_stage_fallback, test_direct_headroom,
+                 test_stage_reservation, test_error_redaction,
+                 test_status_file, test_watchdog,
                  test_watchdog_deadline, test_orphan_partial_sweep,
                  test_symlink_handoff, test_existing_state_table,
                  test_dangling_symlink_sweep):

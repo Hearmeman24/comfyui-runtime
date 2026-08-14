@@ -21,6 +21,7 @@ locally the file staged on the volume already, and the rename is instant.
 Either way the publish goes through `<dest>.partial` + os.replace, so a partial
 file is never visible at the path a workflow loads from.
 """
+import contextlib
 import json
 import os
 import re
@@ -33,7 +34,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 # Bound per-request HTTP waits so a stuck/gated transfer raises instead of
 # blocking forever (set before huggingface_hub reads it at import time).
@@ -68,6 +70,9 @@ LOCAL_STAGE = Path(os.getenv("HF_LOCAL_STAGE", "/hf_stage"))
 # committing to the local path; a container disk too small for the file falls
 # back to the volume.
 LOCAL_STAGE_HEADROOM = 2.5
+# Bound the ranged-GET size probe used for non-HF URLs: one round trip per
+# direct entry at boot, and a dead host must not add minutes to it.
+SIZE_PROBE_TIMEOUT = 15
 
 # https://huggingface.co/<repo_id>/resolve/<revision>/<file_in_repo>[?...]
 HF_URL_RE = re.compile(
@@ -75,6 +80,40 @@ HF_URL_RE = re.compile(
 )
 
 GDRIVE_HOSTS = {"drive.google.com", "docs.google.com"}
+
+# Any http(s) URL inside a free-text error message.
+URL_IN_TEXT_RE = re.compile(r"https?://[^\s'\"<>\\]+")
+
+
+def redact_url(url: str) -> str:
+    """scheme://host/path, with the query string and any userinfo dropped.
+
+    A presigned R2/S3 link carries a LIVE signature in its query string, and a
+    failed download's message is printed by snapshot() into stdout, which
+    start.sh:115 tees to $NETWORK_VOLUME/comfyui.log - the file the triage
+    block tells a customer to paste into Discord. Host and path are what
+    troubleshooting actually needs; the credential is not.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<url>"
+    if not parts.scheme:
+        return url
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def scrub_urls(text: str) -> str:
+    """Redact every URL in a message we did not write.
+
+    aria2c, gdown and huggingface_hub all echo the URL they were given, so
+    redacting only our own strings would leave the signature in the child
+    process's message.
+    """
+    return URL_IN_TEXT_RE.sub(lambda m: redact_url(m.group(0)), text)
 
 
 @dataclass
@@ -92,6 +131,7 @@ class Job:
     end_ts: float = 0.0
     stage_dir: Optional[Path] = None
     error: Optional[str] = None
+    reserved_bytes: int = 0  # local-stage budget this job holds while in flight
 
 
 def floor_bytes(job: Job) -> int:
@@ -107,8 +147,11 @@ def write_status(jobs: list) -> None:
     if not path:
         return
     try:
+        # Redacted here too: boot_report.py only ever reads the host out of
+        # this field (boot_report.py:136), and /tmp/hf_download_status.json is
+        # one more file a customer can be asked to paste.
         payload = {j.dest.name: {"status": j.status, "error": j.error,
-                                 "url": j.url} for j in jobs}
+                                 "url": redact_url(j.url)} for j in jobs}
         Path(path).write_text(json.dumps(payload, indent=1))
     except OSError as e:
         print(f"[hf-manager] could not write status file: {e}", flush=True)
@@ -158,7 +201,51 @@ def fetch_sizes(jobs: list[Job]) -> None:
             info = fs.info(f"{j.repo_id}/{j.filename}", revision=j.revision)
             j.total_bytes = int(info.get("size") or 0)
         except Exception as e:
-            print(f"[hf-manager] size lookup failed for {j.dest.name}: {e}", flush=True)
+            print(f"[hf-manager] size lookup failed for {j.dest.name}: "
+                  f"{scrub_urls(str(e))}", flush=True)
+
+
+def ranged_size(url: str) -> int:
+    """Size of a non-HF URL via a one-byte ranged GET, or 0 if unknown.
+
+    A ranged GET, never a HEAD: a presigned R2/S3 URL is signed for GET and
+    answers a HEAD with 403 (CLAUDE.md section 3). A well-behaved server
+    replies 206 with `Content-Range: bytes 0-0/<total>`; one that ignores the
+    Range header replies 200, and then Content-Length is the whole file.
+    """
+    req = Request(url, method="GET", headers={"Range": "bytes=0-0"})
+    with urlopen(req, timeout=SIZE_PROBE_TIMEOUT) as resp:
+        cr = resp.headers.get("Content-Range") or ""
+        if "/" in cr:
+            total = cr.rsplit("/", 1)[1].strip()
+            if total.isdigit():
+                return int(total)
+        if getattr(resp, "status", None) == 200:
+            return int(resp.headers.get("Content-Length") or 0)
+    return 0
+
+
+def fetch_direct_sizes(jobs: list[Job]) -> None:
+    """Size the aria2c entries so pick_stage_dir has something to weigh.
+
+    Costs one round trip per direct entry at boot. That is cheap next to the
+    file itself, and there is no other source: a presigned R2 link is exactly
+    the kind of entry that runs to tens of GB (CONTRACTS.md:85-87), and without
+    a size it would take the local disk unmeasured.
+
+    gdrive entries are deliberately not probed - Drive answers a plain GET with
+    an HTML confirmation page whose Content-Length is not the file's - so they
+    stay size-unknown and stage on the volume.
+    """
+    for j in jobs:
+        try:
+            j.total_bytes = ranged_size(j.url)
+        except Exception as e:
+            print(f"[hf-manager] size probe failed for {j.dest.name}: "
+                  f"{scrub_urls(str(e))}", flush=True)
+        if not j.total_bytes:
+            print(f"[hf-manager] {j.dest.name}: size unknown; staging on the volume",
+                  flush=True)
 
 
 def fmt_bytes(n: float) -> str:
@@ -196,21 +283,68 @@ def partial_path(job: Job) -> Path:
     return job.dest.with_name(job.dest.name + ".partial")
 
 
-def pick_stage_dir(job: Job) -> Path:
+# Bytes the in-flight jobs have already committed to LOCAL_STAGE. Guarded by
+# the run lock that run_job/snapshot already share; a second lock would only
+# add a way to take them in the wrong order.
+_local_reserved = 0
+
+
+def reset_reservations() -> None:
+    global _local_reserved
+    _local_reserved = 0
+
+
+def release_reservation(job: Job, lock: Optional[threading.Lock] = None) -> None:
+    """Give a finished job's local-stage budget back.
+
+    By the time a job ends, whatever it wrote is real: on success the staged
+    file IS the model and disk_usage already counts it, on failure the stage
+    is gone and the space is back. Either way the reservation has served its
+    purpose and holding it longer would double-count.
+    """
+    global _local_reserved
+    with (lock or contextlib.nullcontext()):
+        _local_reserved = max(_local_reserved - job.reserved_bytes, 0)
+        job.reserved_bytes = 0
+
+
+def pick_stage_dir(job: Job, lock: Optional[threading.Lock] = None) -> Path:
     """Local disk when it has room for this file, else beside the destination.
 
     Falling back matters: the container disk is typically 60 GB while single
     models run to 25 GB, and three of those in flight would fill it. A file
     that doesn't fit locally still downloads, just the slower way.
+
+    Two things the naive version got wrong:
+
+    - An unknown size (`total_bytes == 0`) used to mean "stage locally",
+      i.e. exactly the entries nobody had measured skipped the guard. It now
+      means the opposite: an unmeasured file does not get to risk the disk.
+    - `disk_usage().free` is a snapshot, and POOL_SIZE workers read it
+      concurrently. Three of them could each see 60 GB free and each commit a
+      25 GB model to it, and the loser hits ENOSPC halfway down. Bytes already
+      committed are subtracted from the budget under the run lock, so the
+      second and third caller see what the first one took.
     """
+    global _local_reserved
+    need = int(job.total_bytes * LOCAL_STAGE_HEADROOM)
     try:
         LOCAL_STAGE.mkdir(parents=True, exist_ok=True)
-        free = shutil.disk_usage(LOCAL_STAGE).free
-        if not job.total_bytes or free > job.total_bytes * LOCAL_STAGE_HEADROOM:
-            return LOCAL_STAGE / job.dest.name
-        print(f"[hf-manager] {job.dest.name}: staging on the volume "
-              f"({fmt_bytes(free)} free locally, needs "
-              f"{fmt_bytes(job.total_bytes * LOCAL_STAGE_HEADROOM)})", flush=True)
+        with (lock or contextlib.nullcontext()):
+            free = shutil.disk_usage(LOCAL_STAGE).free
+            budget = free - _local_reserved
+            if job.total_bytes and budget > need:
+                _local_reserved += job.total_bytes
+                job.reserved_bytes = job.total_bytes
+                return LOCAL_STAGE / job.dest.name
+            reserved = _local_reserved
+        if job.total_bytes:
+            print(f"[hf-manager] {job.dest.name}: staging on the volume "
+                  f"({fmt_bytes(free)} free locally, {fmt_bytes(reserved)} already "
+                  f"committed, needs {fmt_bytes(need)})", flush=True)
+        else:
+            print(f"[hf-manager] {job.dest.name}: staging on the volume "
+                  f"(size unknown, so the local disk is not risked)", flush=True)
     except OSError as e:
         print(f"[hf-manager] local staging unavailable ({e}); using the volume",
               flush=True)
@@ -282,10 +416,24 @@ def download_hf(job: Job, stage: Path) -> Path:
     return Path(local_path)
 
 
+def run_downloader(cmd: list, job: Job) -> None:
+    """Run a child downloader without letting its argv reach an error message.
+
+    `check=True` raises CalledProcessError, whose __str__ embeds the whole
+    command list - URL, signature and all - and run_job stores that as the
+    entry's error, which snapshot() prints into the boot log. The exit code
+    and the redacted URL are what triage needs.
+    """
+    proc = subprocess.run(cmd)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{cmd[0]} exited {proc.returncode} "
+                           f"fetching {redact_url(job.url)}")
+
+
 def download_gdrive(job: Job, stage: Path) -> Path:
     # --fuzzy accepts share links (file/d/<id>/view), not only uc?id= URLs.
     out = stage / job.dest.name
-    subprocess.run(["gdown", "--fuzzy", "-O", str(out), job.url], check=True)
+    run_downloader(["gdown", "--fuzzy", "-O", str(out), job.url], job)
     return out
 
 
@@ -295,7 +443,7 @@ def download_aria(job: Job, stage: Path) -> Path:
         "--continue=true", "--summary-interval=0", "--console-log-level=warn",
         "-d", str(stage), "-o", job.dest.name, job.url,
     ]
-    subprocess.run(cmd, check=True)
+    run_downloader(cmd, job)
     return stage / job.dest.name
 
 
@@ -308,7 +456,7 @@ def run_job(job: Job, lock: threading.Lock) -> None:
         job.start_ts = time.time()
     try:
         job.dest.parent.mkdir(parents=True, exist_ok=True)
-        stage = pick_stage_dir(job)
+        stage = pick_stage_dir(job, lock)
         if stage.exists():
             shutil.rmtree(stage, ignore_errors=True)
         stage.mkdir(parents=True, exist_ok=True)
@@ -363,8 +511,12 @@ def run_job(job: Job, lock: threading.Lock) -> None:
     except Exception as e:
         with lock:
             job.status = "failed"
-            job.error = str(e)
+            # Belt and braces on top of run_downloader: hf_hub_download and a
+            # child's own stderr both echo URLs we did not format.
+            job.error = scrub_urls(str(e))
             job.end_ts = time.time()
+    finally:
+        release_reservation(job, lock)
 
 
 def snapshot(jobs: list[Job], started_at: float, lock: threading.Lock,
@@ -464,11 +616,16 @@ def main() -> int:
     print(f"[hf-manager] {len(pending)} of {len(jobs)} files to download; "
           f"resolving sizes...", flush=True)
     fetch_sizes([j for j in pending if j.kind == "hf"])
+    # aria2c entries get a size too, or pick_stage_dir has nothing to weigh
+    # them against. Presigned R2 and CivitAI links route through this path
+    # (CONTRACTS.md:85-87) and are not small.
+    fetch_direct_sizes([j for j in pending if j.kind == "direct"])
     total = sum(j.total_bytes for j in pending)
     print(f"[hf-manager] total size: {fmt_bytes(total)}; "
           f"starting {POOL_SIZE}-way pool", flush=True)
 
     lock = threading.Lock()
+    reset_reservations()
     started_at = time.time()
     prev_bytes: dict = {}
 

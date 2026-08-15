@@ -310,7 +310,9 @@ pins, sage on/off").
   "models_symlink": false,               // optional, default false; qwen symlinks models/ too
                                          //   (comfyui-qwen-image/src/start.sh:58; plan §4 keeps it
                                          //   as an option so existing volumes see zero change)
-  "custom_nodes": {                      // optional; boot-time clone list
+  "custom_nodes": {                      // optional; boot-time clone list. THIS
+                                         //   template's packs; the runtime adds
+                                         //   its own on top (§5e)
     "target": "image",                   // "image" ($COMFYUI_DIR/custom_nodes, wan) |
                                          // "volume" ($PERSIST_ROOT/custom_nodes, qwen :46,109-145)
     "repos": [
@@ -507,6 +509,36 @@ HF_TOKEN sanity check + LTX-2.5 gated preflight (`start.sh:190-239`) in `pre_dow
 `kornia==0.8.2` pin (`start.sh:461-469`) in `pre_launch.sh`. The Director node entry reproduces
 ltx2's boot-time best-effort pull of the image-baked pack (`comfyui-ltx2/src/start.sh:92-101`; clone
 URL confirmed at `comfyui-ltx2/Dockerfile:95`): the dir exists, so the loop's pull branch runs.
+
+### 5e. src/runtime_nodes.json — packs every template gets
+
+A JSON array in THIS repo, same entry syntax as `custom_nodes.repos`
+(`"<url>"`, `"<url>|<sha>"`, `"<url>|force"`):
+
+```json
+[
+  "https://github.com/Hearmeman24/ComfyUI-HearmemanAI-Upscale.git"
+]
+```
+
+`start.sh` reads it before `template.json`'s list and clones both through the one loop. A pack
+belongs here when every template should have it: one push plus a `stable` promotion reaches all of
+them, instead of an identical one-line PR per template repo. A pack only one template needs stays
+in that template's `custom_nodes.repos`.
+
+Rules, all enforced by `tools/test_custom_node_list.py`:
+
+- **Dedup is by directory name**, the same `basename <url> .git` the loop uses. A name on both
+  lists is cloned once.
+- **On a collision the TEMPLATE's entry wins**, at the runtime entry's position. The template is
+  the more specific source and may carry a pin the runtime list does not.
+- **A missing or malformed file costs the runtime packs, never the boot.** It is read on every pod
+  of every template, so it fails open: unreadable → empty list, one warning on stderr, the
+  template's own list still clones.
+- **Keep the bar high.** These packs clone on every template, so favour ones with no dependencies:
+  a `requirements.txt` here is a pip install on every boot of every pod, and one bad entry breaks
+  four templates at once rather than one. Anything heavy or version-sensitive belongs in a
+  template's own list, or in the base image.
 
 ---
 

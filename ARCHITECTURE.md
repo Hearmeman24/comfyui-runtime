@@ -123,6 +123,13 @@ template still boots. **Never delete a flag a customer may have saved.**
 **`auto_download`** is a *suppression* list, not a download list: models the node packs fetch
 themselves, named here so the boot report stops calling them missing.
 
+**`custom_nodes.repos`** are the packs *this* template clones at boot. Packs that every template
+should have go in `src/runtime_nodes.json` in this repo instead (`CONTRACTS.md` §5e) — one push and
+a `stable` promotion reaches all of them, rather than an identical one-line PR per template repo.
+Both lists feed the same loop, deduplicated by directory name, and on a collision the template's
+entry wins. Keep the runtime list to packs with no dependencies: a `requirements.txt` there is a
+pip install on every boot of every pod.
+
 ---
 
 ## Adding a template

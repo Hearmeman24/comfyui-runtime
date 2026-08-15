@@ -449,7 +449,11 @@ if [ ! -x /usr/local/bin/download_with_aria.py ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Custom-node clone loop from template.json custom_nodes.repos.
+# Custom-node clone loop, from TWO sources merged in one place:
+#   1. src/runtime_nodes.json in THIS repo - packs every template gets. One
+#      push plus a `stable` promotion puts a pack on all of them, instead of
+#      an identical one-line PR per template repo.
+#   2. template.json custom_nodes.repos - that template's own packs.
 # Entry syntax (CONTRACTS.md section 5): "<url>", "<url>|<sha>", "<url>|force".
 # Requirements installs run only when the checkout changed (fresh clone, or
 # HEAD moved), are backgrounded, and their PIDs collected and waited before
@@ -464,10 +468,52 @@ fi
 export CUSTOM_NODES_DIR
 mkdir -p "$CUSTOM_NODES_DIR"
 
+# The runtime's own list. [] on anything unreadable: this file is read on every
+# pod of every template, so a typo in it must cost the runtime packs, never the
+# boot.
+runtime_nodes_get() {
+    [ -n "${RUNTIME_DIR:-}" ] || return 0
+    [ -f "$RUNTIME_DIR/src/runtime_nodes.json" ] || return 0
+    python3 - "$RUNTIME_DIR/src/runtime_nodes.json" <<'PY'
+import json
+import sys
+
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception as exc:
+    print(f"WARNING: ignoring unreadable {sys.argv[1]}: {exc}", file=sys.stderr)
+    sys.exit(0)
+if isinstance(data, list):
+    for item in data:
+        if isinstance(item, str) and item.strip():
+            print(item)
+PY
+}
+
+# Runtime list first, then the template's. Deduplicated by the directory name
+# the loop derives below, because two entries naming one directory would clone
+# and then clone over the top. A name on both lists keeps the runtime's
+# position but the TEMPLATE's entry: the template is the more specific source
+# and may carry a pin the runtime list does not.
 declare -A PIP_INSTALL_PIDS=()
+declare -A CUSTOM_NODE_SEEN=()
 CUSTOM_NODE_REPOS=()
+add_custom_node_entry() {
+    local entry="$1" name
+    name="$(basename "${entry%%|*}" .git)"
+    # "0" is a non-empty string, so index 0 tests as seen correctly here.
+    if [ -n "${CUSTOM_NODE_SEEN[$name]:-}" ]; then
+        CUSTOM_NODE_REPOS[${CUSTOM_NODE_SEEN[$name]}]="$entry"
+    else
+        CUSTOM_NODE_SEEN[$name]=${#CUSTOM_NODE_REPOS[@]}
+        CUSTOM_NODE_REPOS+=("$entry")
+    fi
+}
 while IFS= read -r repo_entry; do
-    [ -n "$repo_entry" ] && CUSTOM_NODE_REPOS+=("$repo_entry")
+    [ -n "$repo_entry" ] && add_custom_node_entry "$repo_entry"
+done < <(runtime_nodes_get)
+while IFS= read -r repo_entry; do
+    [ -n "$repo_entry" ] && add_custom_node_entry "$repo_entry"
 done < <(template_json_get custom_nodes.repos)
 
 for entry in "${CUSTOM_NODE_REPOS[@]}"; do

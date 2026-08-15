@@ -348,6 +348,70 @@ def test_stage_fallback(tmp):
     print("ok: 2.5x headroom check picks local disk vs volume fallback")
 
 
+def test_no_volume_disables_local_staging(tmp):
+    """A pod with no network volume must not stage locally.
+
+    start.sh sets NETWORK_VOLUME=/ when /workspace is absent (start.sh:105-110),
+    which makes PERSIST_ROOT="//ComfyUI" -> /ComfyUI: the SAME container disk
+    the stage is on. Staging then copies every model local->local, so the pod
+    transiently needs 2x the bytes and volume_sync moves 77 GB from one
+    directory to another on one filesystem for no gain. Observed on a real
+    minimax pod, 2026-08-15.
+    """
+    dm.LOCAL_STAGE = tmp / "hf_stage"
+    dm.reset_reservations()
+    job = dm.Job(url="u", dest=tmp / "models" / "big.safetensors", kind="hf")
+    job.total_bytes = 10 * 1024 ** 3
+    real_du = dm.shutil.disk_usage
+    real_flag = dm.STAGE_LOCAL
+    buf = io.StringIO()
+    try:
+        # Plenty of headroom: the ONLY reason not to stage locally is the flag.
+        dm.shutil.disk_usage = lambda p: types.SimpleNamespace(free=10 ** 15)
+
+        dm.STAGE_LOCAL = False
+        with contextlib.redirect_stdout(buf):
+            stage = dm.pick_stage_dir(job)
+        assert stage == job.dest.parent / ".hf_stage" / job.dest.name, \
+            f"no volume must stage beside the destination, got {stage}"
+        assert job.reserved_bytes == 0, \
+            "a skipped local stage must not reserve local budget"
+        assert not dm.stage_is_local(stage), \
+            "and the handoff must be a same-fs rename, not a symlink + sync"
+
+        dm.STAGE_LOCAL = True
+        with contextlib.redirect_stdout(buf):
+            stage = dm.pick_stage_dir(job)
+        assert stage == dm.LOCAL_STAGE / job.dest.name, \
+            "with a volume attached the local disk is still used"
+    finally:
+        dm.shutil.disk_usage = real_du
+        dm.STAGE_LOCAL = real_flag
+        dm.reset_reservations()
+    print("ok: no network volume disables local staging (and its volume_sync)")
+
+
+def test_stage_local_flag_reads_the_env(tmp):
+    """start.sh communicates 'no volume' by exporting HF_STAGE_LOCAL=0."""
+    for value, expected in (("0", False), ("false", False), ("FALSE", False),
+                            ("1", True), ("", True), (None, True)):
+        env = dict(os.environ)
+        env.pop("HF_STAGE_LOCAL", None)
+        if value is not None:
+            env["HF_STAGE_LOCAL"] = value
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, %r); "
+             "import hf_download_manager as m; print(m.STAGE_LOCAL)"
+             % str(REPO / "src")],
+            env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        got = r.stdout.strip() == "True"
+        assert got is expected, \
+            f"HF_STAGE_LOCAL={value!r} should give STAGE_LOCAL={expected}, got {got}"
+    print("ok: HF_STAGE_LOCAL is read from the environment")
+
+
 def test_direct_headroom(tmp):
     """BUG 1: the 2.5x guard must apply to aria2c and gdown entries too.
 
@@ -816,7 +880,10 @@ def main() -> int:
     test_env_timeouts()
     for test in (test_parse_manifest, test_exit_codes, test_happy_path,
                  test_skip_and_refetch, test_floor_failure,
-                 test_stage_fallback, test_direct_headroom,
+                 test_stage_fallback,
+                 test_no_volume_disables_local_staging,
+                 test_stage_local_flag_reads_the_env,
+                 test_direct_headroom,
                  test_stage_reservation, test_error_redaction,
                  test_status_file, test_watchdog,
                  test_watchdog_deadline, test_orphan_partial_sweep,

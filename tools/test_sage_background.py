@@ -219,7 +219,10 @@ def test_static_order():
     _, sage_beg = extract_marked("sage install + probe")
     _, join_beg = extract_marked("sage join")
     _, launch_at = extract_launch()
-    downloads_at = line_index("hf_download_manager.py")
+    # The INVOCATION, not any mention: a comment naming the file is not the
+    # call, and matching one silently moved this boundary to the top of the
+    # script and failed the ordering check for the wrong reason.
+    downloads_at = line_index('python3 "$RUNTIME_DIR/src/hf_download_manager.py"')
     ok(downloads_at is not None, "download manager call not found in start.sh")
     ok(sage_beg < downloads_at,
        "the sage spawn must sit above the download manager")

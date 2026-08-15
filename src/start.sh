@@ -110,6 +110,17 @@ if [ ! -d "$NETWORK_VOLUME" ]; then
 fi
 export NETWORK_VOLUME
 
+# NVMe-first staging only pays off when the destination is on a DIFFERENT
+# filesystem. With no volume, PERSIST_ROOT below is "//ComfyUI" -> /ComfyUI,
+# the same container disk /hf_stage is on, so staging would make the pod hold
+# 2x every model at once and leave volume_sync copying the whole set from one
+# directory to another on one filesystem. Download straight to the destination
+# instead (hf_download_manager.py STAGE_LOCAL).
+if [ "$NETWORK_VOLUME" = "/" ]; then
+    export HF_STAGE_LOCAL=0
+    echo "💾 No network volume: downloading models straight to disk (no staging, no background copy)."
+fi
+
 # Keep a durable copy of the whole boot log on the volume so support never
 # depends on RunPod's console scrollback (CLAUDE.md section 6).
 exec > >(tee -a "$NETWORK_VOLUME/comfyui.log") 2>&1
@@ -738,10 +749,18 @@ for raw in m.read_text().splitlines():
 sys.exit(1)
 PY
 then
-    echo "📦 Models are on local disk and usable now; copying them to your network volume in the background."
-    nohup python3 "$RUNTIME_DIR/src/volume_sync.py" "$HF_QUEUE_FILE" \
-        > >(tee -a "$NETWORK_VOLUME/comfyui.log") 2>&1 &
-    report_kv volume_sync running
+    if [ "$NETWORK_VOLUME" = "/" ]; then
+        # Belt and braces. With HF_STAGE_LOCAL=0 nothing publishes a symlink so
+        # the gate above should not fire at all, but a leftover link from an
+        # earlier boot would otherwise start a copy with no volume to copy to.
+        echo "📦 Models are on disk and usable now; no network volume, so nothing to copy."
+        report_kv volume_sync skipped_no_volume
+    else
+        echo "📦 Models are on local disk and usable now; copying them to your network volume in the background."
+        nohup python3 "$RUNTIME_DIR/src/volume_sync.py" "$HF_QUEUE_FILE" \
+            > >(tee -a "$NETWORK_VOLUME/comfyui.log") 2>&1 &
+        report_kv volume_sync running
+    fi
 fi
 
 # --- comfy extra args: begin -------------------------------------------------

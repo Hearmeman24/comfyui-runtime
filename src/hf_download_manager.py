@@ -65,6 +65,14 @@ DEFAULT_MIN_SIZE_MB = 10.0
 # Staging locally also takes the volume out of the download path entirely; the
 # finished file crosses to it once, as a single sequential copy.
 LOCAL_STAGE = Path(os.getenv("HF_LOCAL_STAGE", "/hf_stage"))
+# ...but only when the destination is actually somewhere else. start.sh exports
+# HF_STAGE_LOCAL=0 for a pod with no network volume, where NETWORK_VOLUME is "/"
+# and PERSIST_ROOT collapses onto the container disk the stage already lives on
+# (start.sh:105-110,191). Staging there buys nothing and costs everything: the
+# pod needs 2x every model's bytes at once, and volume_sync then copies the whole
+# set from one directory to another on one filesystem. Seen on a real minimax
+# pod moving 77 GB to nowhere, 2026-08-15.
+STAGE_LOCAL = os.getenv("HF_STAGE_LOCAL", "1").strip().lower() not in ("0", "false", "no")
 # xet keeps its chunk cache alongside the assembled file, so a file needs
 # roughly 2x its own size on disk while in flight. Ask for 2.5x before
 # committing to the local path; a container disk too small for the file falls
@@ -327,6 +335,12 @@ def pick_stage_dir(job: Job, lock: Optional[threading.Lock] = None) -> Path:
       second and third caller see what the first one took.
     """
     global _local_reserved
+    if not STAGE_LOCAL:
+        # No separate volume: the "local disk" and the destination are one
+        # filesystem, so this is the fast path already. Returning the
+        # beside-the-destination stage makes the handoff a same-fs rename and
+        # leaves stage_is_local() false, which is what stops volume_sync.
+        return job.dest.parent / ".hf_stage" / job.dest.name
     need = int(job.total_bytes * LOCAL_STAGE_HEADROOM)
     try:
         LOCAL_STAGE.mkdir(parents=True, exist_ok=True)

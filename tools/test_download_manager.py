@@ -392,19 +392,32 @@ def test_no_volume_disables_local_staging(tmp):
 
 
 def test_stage_local_flag_reads_the_env(tmp):
-    """start.sh communicates 'no volume' by exporting HF_STAGE_LOCAL=0."""
+    """start.sh communicates 'no volume' by exporting HF_STAGE_LOCAL=0.
+
+    STAGE_LOCAL is resolved at import time, so this needs a fresh interpreter
+    per value rather than a monkeypatch. The child stubs huggingface_hub the
+    same way this module does: hf_download_manager imports it at module scope
+    (:45) and the CI executor has no third-party packages at all, so a bare
+    import there is a ModuleNotFoundError, not a test result.
+    """
+    child = (
+        "import sys, types\n"
+        "hf = types.ModuleType('huggingface_hub')\n"
+        "hf.hf_hub_download = lambda *a, **k: None\n"
+        "hf.HfFileSystem = object\n"
+        "sys.modules['huggingface_hub'] = hf\n"
+        "sys.path.insert(0, %r)\n"
+        "import hf_download_manager as m; print(m.STAGE_LOCAL)\n"
+        % str(REPO / "src")
+    )
     for value, expected in (("0", False), ("false", False), ("FALSE", False),
                             ("1", True), ("", True), (None, True)):
         env = dict(os.environ)
         env.pop("HF_STAGE_LOCAL", None)
         if value is not None:
             env["HF_STAGE_LOCAL"] = value
-        r = subprocess.run(
-            [sys.executable, "-c",
-             "import sys; sys.path.insert(0, %r); "
-             "import hf_download_manager as m; print(m.STAGE_LOCAL)"
-             % str(REPO / "src")],
-            env=env, capture_output=True, text=True)
+        r = subprocess.run([sys.executable, "-c", child],
+                           env=env, capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
         got = r.stdout.strip() == "True"
         assert got is expected, \

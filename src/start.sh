@@ -168,10 +168,22 @@ fi
 # stdout it stays out of $NETWORK_VOLUME/comfyui.log, the file support asks
 # customers to paste into Discord (see the tee at the top of this script).
 #
+# Whether JupyterLab runs at all is a per-template choice: template.json
+# "jupyter": false skips it entirely (CONTRACTS.md section 5). A private client
+# pod publishes 8188 only, and leaving 8888 off the RunPod template hides the
+# proxy route without stopping the process from running and binding.
+#
 # The block between the two JUPYTER-LAUNCH markers is extracted and executed by
-# tools/test_jupyter_launch.py. Keep the markers.
+# tools/test_jupyter_launch.py, together with the template_json_get helper it
+# calls. Keep the markers.
 # ---------------------------------------------------------------------------
 # >>> JUPYTER-LAUNCH
+# Opt OUT, so the templates that carry no "jupyter" key are untouched: an
+# absent key reads as the empty string, and only a literal false disables.
+# Same direction as the base-set flags in provisioner.flag_enabled (:55-62) —
+# a typo leaves JupyterLab running rather than silently taking it away.
+JUPYTER_ENABLED="$(template_json_get jupyter)"
+
 start_jupyter() {
     local notebook_dir="$1"
     local -a auth_args
@@ -185,7 +197,9 @@ start_jupyter() {
     jupyter-lab --ip=0.0.0.0 --allow-root --no-browser "${auth_args[@]}" --ServerApp.allow_origin='*' --ServerApp.allow_credentials=True --notebook-dir="$notebook_dir" &
 }
 
-if [ "$NETWORK_VOLUME" = "/" ]; then
+if [ "$JUPYTER_ENABLED" = "false" ]; then
+    echo "📓 JupyterLab is disabled for this template (\"jupyter\": false in template.json). Not starting it."
+elif [ "$NETWORK_VOLUME" = "/" ]; then
     echo "NETWORK_VOLUME directory doesn't exist. Starting JupyterLab on root directory..."
     start_jupyter /
 else

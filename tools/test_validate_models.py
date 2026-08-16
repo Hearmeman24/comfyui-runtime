@@ -440,6 +440,18 @@ def test_template_schema_accepts_comfy_extra_args():
           "E16: and it is in TEMPLATE_KEYS, not accepted by accident")
 
 
+def test_template_schema_accepts_jupyter():
+    """A private client template sets "jupyter": false so the runtime never
+    starts JupyterLab (src/start.sh:185,:200). The ordering this file's own
+    docstring spells out applies: the key is allowlisted here and promoted to
+    `stable` BEFORE any template.json carries it, or that template goes red."""
+    t = {"provisioning_mode": "walk", "jupyter": False}
+    check(vm.check_template_schema(t) == [],
+          "E16: jupyter is an allowed top-level key")
+    check("jupyter" in vm.TEMPLATE_KEYS,
+          "E16: and it is in TEMPLATE_KEYS, not accepted by accident")
+
+
 def test_template_schema_rejects_unknown_top_level_key():
     """Measured against wan: 'flags' -> 'flag' disables the ENTIRE template and
     still exits 0 everywhere (EXECUTION.md E16)."""
@@ -788,6 +800,7 @@ def main() -> int:
         test_template_schema_accepts_both_real_shapes,
         test_template_schema_accepts_entrypoint_keys,
         test_template_schema_accepts_comfy_extra_args,
+        test_template_schema_accepts_jupyter,
         test_template_schema_rejects_unknown_top_level_key,
         test_template_schema_rejects_unknown_flag_key,
         test_template_schema_rejects_unknown_swap_group_and_profile_shape,

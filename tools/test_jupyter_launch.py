@@ -164,7 +164,11 @@ def launch(network_volume: str, token=None, template=None,
         r = subprocess.run(["bash", str(script)], capture_output=True,
                            text=True, env=env)
         ok(r.returncode == 0, r.stdout + r.stderr)
-        if not expect_launch:
+        if expect_launch is None:
+            # The caller is asking WHETHER it launched, not asserting it.
+            if not argv_file.exists():
+                return None, r.stdout, ""
+        elif not expect_launch:
             ok(not argv_file.exists(),
                "jupyter-lab was launched but should not have been: "
                + (argv_file.read_text() if argv_file.exists() else ""))
@@ -335,6 +339,33 @@ def test_live_templates_are_untouched():
                f"{name}: JupyterLab must still launch: {out!r}")
 
 
+def test_the_note_agrees_with_the_launch():
+    """Two implementations of one switch: the shell gate in start.sh decides
+    whether JupyterLab runs, and boot_report.jupyter_enabled decides whether
+    the welcome note tells the customer to open port 8888. They must never
+    disagree — a note advertising a port nothing answers on is the bug this
+    pins (found by the skeleton slice against src/note_welcome.md).
+    """
+    sys.path.insert(0, str(REPO / "src"))
+    import boot_report
+
+    for value in (False, True, "false", "False", "FALSE", "FaLsE", "true",
+                  "no", "off", "0", 0, "", None, [], {}):
+        argv, _, _ = launch("/workspace", template={"jupyter": value},
+                            expect_launch=None)
+        shell_launched = argv is not None
+        python_says = boot_report.jupyter_enabled({"jupyter": value})
+        ok(shell_launched == python_says,
+           f"jupyter={value!r}: start.sh launched={shell_launched} but "
+           f"boot_report.jupyter_enabled={python_says}; the note and the pod "
+           f"would disagree")
+    # And the absent key, which is what all four live templates ship.
+    ok(boot_report.jupyter_enabled({}) is True,
+       "an absent jupyter key must read as enabled")
+    ok(boot_report.jupyter_enabled(None) is True,
+       "no template.json at all must read as enabled")
+
+
 def test_the_key_is_allowlisted_in_the_validator():
     """Ordering, non-negotiable: tools/validate_models.py hard-errors on an
     unknown top-level key, so a template.json may only carry `jupyter` once
@@ -357,6 +388,7 @@ def main():
     test_jupyter_true_launches()
     test_only_false_disables()
     test_live_templates_are_untouched()
+    test_the_note_agrees_with_the_launch()
     test_the_key_is_allowlisted_in_the_validator()
     print(f"jupyter launch self-test: all good ({CHECKS} assertions)")
 

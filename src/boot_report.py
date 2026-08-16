@@ -302,8 +302,30 @@ def render_report(kv, warnings, manifest, provision, hf_status,
     return "\n".join(lines)
 
 
-def render_note(skeleton_path, sections_path, kv, offs, report) -> str:
+# A note section that only applies when JupyterLab actually runs. Kept in the
+# markdown rather than in a python string so the customer-facing prose stays
+# where the rest of it lives.
+JUPYTER_BLOCK = re.compile(r"<!-- IF-JUPYTER -->\n.*?<!-- END-IF-JUPYTER -->\n",
+                           re.S)
+
+
+def jupyter_enabled(template) -> bool:
+    """template.json "jupyter", the SAME truthiness src/start.sh:192 uses.
+
+    Opt out, case insensitive, only false disables. The two implementations
+    are pinned against each other by tools/test_jupyter_launch.py: a note that
+    disagrees with the launch is exactly the bug this guards.
+    """
+    return str((template or {}).get("jupyter", True)).strip().lower() != "false"
+
+
+def render_note(skeleton_path, sections_path, kv, offs, report,
+                template=None) -> str:
     md = Path(skeleton_path).read_text()
+    # A pod with no JupyterLab must not be told to open port 8888.
+    md = (JUPYTER_BLOCK.sub("", md) if not jupyter_enabled(template)
+          else md.replace("<!-- IF-JUPYTER -->\n", "")
+                 .replace("<!-- END-IF-JUPYTER -->\n", ""))
     name = kv.get("template_name", "").strip()
     name = re.sub(r"^comfyui-", "", name) or "ComfyUI"
     if offs:
@@ -382,7 +404,8 @@ def main(argv=None) -> int:
         for seq, (skeleton, folder, title) in enumerate(NOTES, 1):
             try:
                 md = render_note(Path(args.skeleton_dir) / skeleton,
-                                 args.note_sections, kv, offs, report)
+                                 args.note_sections, kv, offs, report,
+                                 read_json(args.template))
                 out = Path(args.notes_root) / folder / f"{title}.json"
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_text(json.dumps(note_workflow(md, title, seq),

@@ -280,13 +280,15 @@ def test_jupyter_false_does_not_launch():
 
 def test_false_in_any_case_disables():
     """template_json_get prints a JSON boolean as lowercase true/false, so the
-    boolean and the string "false" arrive identically. Case is matched
-    case-INSENSITIVELY, which is the one place this switch departs from the
-    family's opt-out flags: everywhere else "safe" means keeping the feature,
-    but here the feature IS the exposure — an unauthenticated shell on a
-    client's pod. `"jupyter": "False"` silently launching JupyterLab is the
-    bad outcome, not the safe one."""
-    for spelling in ("false", "False", "FALSE", "FaLsE"):
+    boolean and the string "false" arrive identically. Case and surrounding
+    whitespace are both ignored, which is the one place this switch departs
+    from the family's opt-out flags: everywhere else "safe" means keeping the
+    feature, but here the feature IS the exposure — an unauthenticated shell
+    on a client's pod. `"jupyter": "False"` silently launching JupyterLab is
+    the bad outcome, not the safe one. Matching flag_enabled's .strip().lower()
+    (src/provisioner.py:57) rather than half of it."""
+    for spelling in ("false", "False", "FALSE", "FaLsE",
+                     "false ", " false", "\tFalse\n", "  FALSE  "):
         for network_volume in ("/workspace", "/"):
             _, out, _ = launch(network_volume, template={"jupyter": spelling},
                                expect_launch=False)
@@ -350,7 +352,8 @@ def test_the_note_agrees_with_the_launch():
     import boot_report
 
     for value in (False, True, "false", "False", "FALSE", "FaLsE", "true",
-                  "no", "off", "0", 0, "", None, [], {}):
+                  "no", "off", "0", 0, "", None, [], {},
+                  "false ", " false", "\tFalse\n", "fa lse", " ", "f alse "):
         argv, _, _ = launch("/workspace", template={"jupyter": value},
                             expect_launch=None)
         shell_launched = argv is not None

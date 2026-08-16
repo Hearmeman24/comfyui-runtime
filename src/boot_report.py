@@ -310,13 +310,17 @@ JUPYTER_BLOCK = re.compile(r"<!-- IF-JUPYTER -->\n.*?<!-- END-IF-JUPYTER -->\n",
 
 
 def jupyter_enabled(template) -> bool:
-    """template.json "jupyter", the SAME truthiness src/start.sh:192 uses.
+    """template.json "jupyter", the SAME truthiness src/start.sh:193 uses.
 
-    Opt out, case insensitive, only false disables. The two implementations
-    are pinned against each other by tools/test_jupyter_launch.py: a note that
-    disagrees with the launch is exactly the bug this guards.
+    Opt out, only false disables, whitespace and case ignored. The `\\s+`
+    substitution mirrors that line's `tr -d '[:space:]'` exactly, internal
+    whitespace included; .strip() would leave the two disagreeing on
+    "fa lse". The two implementations are pinned against each other by
+    tools/test_jupyter_launch.py: a note that disagrees with the launch is
+    exactly the bug this guards.
     """
-    return str((template or {}).get("jupyter", True)).strip().lower() != "false"
+    raw = str((template or {}).get("jupyter", True))
+    return re.sub(r"\s+", "", raw).lower() != "false"
 
 
 def render_note(skeleton_path, sections_path, kv, offs, report,

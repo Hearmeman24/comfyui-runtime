@@ -183,13 +183,14 @@ fi
 # direction as the base-set flags in provisioner.flag_enabled (:55-62) — a
 # typo leaves JupyterLab running rather than silently taking it away.
 #
-# The match is case INSENSITIVE, which is where this switch departs from those
-# flags. Everywhere else "safe" means keeping the feature; here the feature IS
+# Whitespace and case are both ignored, matching flag_enabled's .strip()
+# .lower() (provisioner.py:57). That is where this switch departs from those
+# flags: everywhere else "safe" means keeping the feature; here the feature IS
 # the exposure — an unauthenticated shell on a paying client's pod — so
-# "jupyter": "False" quietly launching JupyterLab is the bad outcome, not the
+# "jupyter": "False " quietly launching JupyterLab is the bad outcome, not the
 # safe one. `tr`, not ${var,,}: macOS ships bash 3.2 and the test harness runs
 # this block under whatever bash is on PATH.
-JUPYTER_ENABLED="$(template_json_get jupyter | tr '[:upper:]' '[:lower:]')"
+JUPYTER_ENABLED="$(template_json_get jupyter | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
 
 start_jupyter() {
     local notebook_dir="$1"

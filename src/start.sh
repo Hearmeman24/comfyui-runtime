@@ -179,10 +179,17 @@ fi
 # ---------------------------------------------------------------------------
 # >>> JUPYTER-LAUNCH
 # Opt OUT, so the templates that carry no "jupyter" key are untouched: an
-# absent key reads as the empty string, and only a literal false disables.
-# Same direction as the base-set flags in provisioner.flag_enabled (:55-62) —
-# a typo leaves JupyterLab running rather than silently taking it away.
-JUPYTER_ENABLED="$(template_json_get jupyter)"
+# absent key reads as the empty string, and only "false" disables. Same
+# direction as the base-set flags in provisioner.flag_enabled (:55-62) — a
+# typo leaves JupyterLab running rather than silently taking it away.
+#
+# The match is case INSENSITIVE, which is where this switch departs from those
+# flags. Everywhere else "safe" means keeping the feature; here the feature IS
+# the exposure — an unauthenticated shell on a paying client's pod — so
+# "jupyter": "False" quietly launching JupyterLab is the bad outcome, not the
+# safe one. `tr`, not ${var,,}: macOS ships bash 3.2 and the test harness runs
+# this block under whatever bash is on PATH.
+JUPYTER_ENABLED="$(template_json_get jupyter | tr '[:upper:]' '[:lower:]')"
 
 start_jupyter() {
     local notebook_dir="$1"

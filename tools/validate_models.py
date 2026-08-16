@@ -123,9 +123,9 @@ TEMPLATE_KEYS = frozenset({
     # A per-template workaround for an upstream ComfyUI bug belongs here rather
     # than in a RunPod form field, so it travels with the repo and is reviewable.
     "comfy_extra_args",
-    # jupyter: default true; a literal false skips the JupyterLab launch
-    # entirely, start.sh :185,:200 (the JUPYTER-LAUNCH block). Private client pods
-    # publish 8188 only, and an unpublished port still leaves the process
+    # jupyter: default true; false (in any case) skips the JupyterLab launch
+    # entirely, start.sh :192,:207 (the JUPYTER-LAUNCH block). Private client
+    # pods publish 8188 only, and an unpublished port still leaves the process
     # running and bound.
     "jupyter",
 })

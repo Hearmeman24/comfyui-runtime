@@ -442,7 +442,7 @@ def test_template_schema_accepts_comfy_extra_args():
 
 def test_template_schema_accepts_jupyter():
     """A private client template sets "jupyter": false so the runtime never
-    starts JupyterLab (src/start.sh:185,:200). The ordering this file's own
+    starts JupyterLab (src/start.sh:192,:207). The ordering this file's own
     docstring spells out applies: the key is allowlisted here and promoted to
     `stable` BEFORE any template.json carries it, or that template goes red."""
     t = {"provisioning_mode": "walk", "jupyter": False}

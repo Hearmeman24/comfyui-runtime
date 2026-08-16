@@ -24,10 +24,14 @@ Five things get pinned here that nobody can check by eye:
   - BOTH call sites are covered. start.sh launches JupyterLab twice, once per
     branch of the NETWORK_VOLUME check, and covering only one is the obvious
     way to get this wrong;
-  - only a literal `false` disables the launch. A missing key, an unreadable
-    template.json, a missing template.json and any junk value all still start
-    JupyterLab, so a typo can never silently take it away from a customer
-    (same direction as provisioner.flag_enabled's opt-out mode, :55-62);
+  - `false` in ANY case disables the launch, and nothing else does. A missing
+    key, an unreadable template.json, a missing template.json and any junk
+    value all still start JupyterLab, so a typo can never silently take it
+    away from a customer (same direction as provisioner.flag_enabled's opt-out
+    mode, :55-62). The case-insensitive match is where this switch departs
+    from those flags: everywhere else "safe" means keeping the feature, but
+    here the feature IS the exposure, so `"jupyter": "False"` quietly starting
+    an unauthenticated shell on a client's pod is the bad outcome;
   - the four live templates' REAL template.json files are driven through the
     block and must all still launch.
 
@@ -270,12 +274,22 @@ def test_jupyter_false_does_not_launch():
            f"one line, not a paragraph (CLAUDE.md section 6): {out!r}")
 
 
-def test_jupyter_false_as_a_string_also_disables():
-    """template_json_get prints booleans as true/false, so the string and the
-    boolean arrive identically. Both must disable; nothing else does."""
-    _, out, _ = launch("/workspace", template={"jupyter": "false"},
-                       expect_launch=False)
-    ok("disabled" in out.lower(), f"string 'false' must disable too: {out!r}")
+def test_false_in_any_case_disables():
+    """template_json_get prints a JSON boolean as lowercase true/false, so the
+    boolean and the string "false" arrive identically. Case is matched
+    case-INSENSITIVELY, which is the one place this switch departs from the
+    family's opt-out flags: everywhere else "safe" means keeping the feature,
+    but here the feature IS the exposure — an unauthenticated shell on a
+    client's pod. `"jupyter": "False"` silently launching JupyterLab is the
+    bad outcome, not the safe one."""
+    for spelling in ("false", "False", "FALSE", "FaLsE"):
+        for network_volume in ("/workspace", "/"):
+            _, out, _ = launch(network_volume, template={"jupyter": spelling},
+                               expect_launch=False)
+            ok("disabled" in out.lower(),
+               f"jupyter={spelling!r} must disable the launch: {out!r}")
+            ok("Starting JupyterLab" not in out,
+               f"jupyter={spelling!r}: no launch may be claimed: {out!r}")
 
 
 def test_jupyter_true_launches():
@@ -288,12 +302,12 @@ def test_jupyter_true_launches():
         ok("disabled" not in out.lower(), f"true must not disable: {out!r}")
 
 
-def test_only_a_literal_false_disables():
+def test_only_false_disables():
     """Opt-out truthiness, the direction the family already uses for base-set
-    flags (src/provisioner.py:55-62): a typo leaves the default in place
-    instead of silently taking JupyterLab away from a customer."""
-    for junk in ("no", "0", 0, "FALSE", "False", "off", "", None, [], {},
-                 "true"):
+    flags (src/provisioner.py:55-62): nothing but false disables, so a typo
+    leaves the customer's JupyterLab where it was. "no"/"0"/"off" are NOT
+    synonyms for false here."""
+    for junk in ("no", "0", 0, "off", "", None, [], {}, "true", "True"):
         argv, out, _ = launch("/workspace", template={"jupyter": junk})
         ok(argv == shlex.split(HISTORICAL.format(dir="/workspace")),
            f"jupyter={junk!r} is not a literal false and must launch: {argv}")
@@ -339,9 +353,9 @@ def main():
     test_both_call_sites_go_through_one_function()
     test_absent_jupyter_key_still_launches()
     test_jupyter_false_does_not_launch()
-    test_jupyter_false_as_a_string_also_disables()
+    test_false_in_any_case_disables()
     test_jupyter_true_launches()
-    test_only_a_literal_false_disables()
+    test_only_false_disables()
     test_live_templates_are_untouched()
     test_the_key_is_allowlisted_in_the_validator()
     print(f"jupyter launch self-test: all good ({CHECKS} assertions)")

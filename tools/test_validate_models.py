@@ -9,13 +9,19 @@ responses, and records every call so the tests can assert what was (and
 was not) requested. Stdlib only, no pytest.
 """
 from __future__ import annotations  # PEP 604 syntax under python < 3.10
+import contextlib
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_models as vm  # noqa: E402
+
+# Every other test swaps vm.http_request out for a FakeNet, so keep the real
+# one from before any of that happens: the bearer-header tests drive it.
+REAL_HTTP_REQUEST = vm.http_request
 
 CHECKS: list[tuple[bool, str]] = []
 
@@ -434,6 +440,18 @@ def test_template_schema_accepts_comfy_extra_args():
           "E16: and it is in TEMPLATE_KEYS, not accepted by accident")
 
 
+def test_template_schema_accepts_jupyter():
+    """A private client template sets "jupyter": false so the runtime never
+    starts JupyterLab (src/start.sh:192,:207). The ordering this file's own
+    docstring spells out applies: the key is allowlisted here and promoted to
+    `stable` BEFORE any template.json carries it, or that template goes red."""
+    t = {"provisioning_mode": "walk", "jupyter": False}
+    check(vm.check_template_schema(t) == [],
+          "E16: jupyter is an allowed top-level key")
+    check("jupyter" in vm.TEMPLATE_KEYS,
+          "E16: and it is in TEMPLATE_KEYS, not accepted by accident")
+
+
 def test_template_schema_rejects_unknown_top_level_key():
     """Measured against wan: 'flags' -> 'flag' disables the ENTIRE template and
     still exits 0 everywhere (EXECUTION.md E16)."""
@@ -610,6 +628,158 @@ def test_prose_is_not_a_filename():
     print("ok: prose and URLs skipped; spaced filenames still checked")
 
 
+# --- private HF repos: the optional bearer token ----------------------------
+
+@contextlib.contextmanager
+def hf_token_env(value):
+    """Set (or clear) HF_TOKEN for the block. The developer's own shell may
+    export one, so every token test pins it rather than inheriting it."""
+    before = os.environ.get("HF_TOKEN")
+    if value is None:
+        os.environ.pop("HF_TOKEN", None)
+    else:
+        os.environ["HF_TOKEN"] = value
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop("HF_TOKEN", None)
+        else:
+            os.environ["HF_TOKEN"] = before
+
+
+class FakeResponse:
+    """The little of urlopen's return value that http_request touches."""
+
+    def __init__(self, url, status=200, headers=None, body=b"[]"):
+        self.url, self.status, self.headers, self._body = url, status, headers or {}, body
+
+    def read(self, n=-1):
+        return self._body[:n] if n and n > 0 else self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def sent_request(url, range_first_byte=False):
+    """Drive the REAL http_request with urlopen stubbed, and hand back the
+    urllib Request it built, so the tests assert on actual outgoing headers."""
+    seen = []
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(req)
+        return FakeResponse(req.full_url)
+
+    real = vm.urllib.request.urlopen
+    vm.urllib.request.urlopen = fake_urlopen
+    try:
+        REAL_HTTP_REQUEST(url, range_first_byte)
+    finally:
+        vm.urllib.request.urlopen = real
+    return seen[0]
+
+
+HF_TREE_URL = "https://huggingface.co/api/models/org/private/tree/main/vae"
+
+
+def test_bearer_header_present_when_hf_token_set():
+    """A private HF repo answers the tree listing only to an authenticated
+    caller, so the client-template CI needs the header. Acceptance criterion:
+    'validate_models.py resolves private HF repos when HF_TOKEN is present'."""
+    with hf_token_env("hf_liveSECRETtokenvalue"):
+        req = sent_request(HF_TREE_URL)
+    check(req.get_header("Authorization") == "Bearer hf_liveSECRETtokenvalue",
+          "token: HF_TOKEN set -> Authorization: Bearer <token> on the HF request")
+    check(req.get_header("User-agent") == vm.UA["User-Agent"],
+          "token: the User-Agent is still sent alongside it")
+
+
+def test_no_bearer_header_without_hf_token():
+    """The public four run with no token and must keep behaving EXACTLY as they
+    do today; an empty-string HF_TOKEN is 'no token', not 'Bearer '."""
+    with hf_token_env(None):
+        req = sent_request(HF_TREE_URL)
+    check(req.get_header("Authorization") is None,
+          "token: HF_TOKEN unset -> no Authorization header at all")
+    with hf_token_env(""):
+        req = sent_request(HF_TREE_URL)
+    check(req.get_header("Authorization") is None,
+          "token: HF_TOKEN='' is treated as absent, never sent as 'Bearer '")
+
+
+def test_bearer_header_never_leaves_huggingface():
+    """http_request is also the presigned R2/S3 and Google Drive path. Attaching
+    the customer's HF token to those requests would hand a live credential to a
+    third-party host, so the header is scoped to huggingface.co over TLS."""
+    with hf_token_env("hf_liveSECRETtokenvalue"):
+        r2 = sent_request("https://r2.example.com/private/lora.safetensors?X-Amz-Signature=x",
+                          range_first_byte=True)
+        lookalike = sent_request("https://huggingface.co.evil.example/api/models/a/b/tree/main")
+        cdn = sent_request("https://cdn-lfs.huggingface.co/repos/aa/bb/model.safetensors")
+    check(r2.get_header("Authorization") is None,
+          "token: no bearer token on a presigned R2/S3 URL")
+    check(lookalike.get_header("Authorization") is None,
+          "token: 'huggingface.co.evil.example' is not huggingface.co")
+    check(cdn.get_header("Authorization") == "Bearer hf_liveSECRETtokenvalue",
+          "token: an HF subdomain (cdn-lfs) still gets it")
+
+
+def test_private_repo_listing_failure_names_the_missing_token():
+    """Today this is the flat '{name}: could not list {repo}: HTTP 401'. On a
+    client repo that is every asset, every build, and it names the symptom
+    instead of the cause."""
+    reg = {"client.safetensors": hf_entry("client.safetensors", "loras",
+                                          repo="org/private", rdir="loras")}
+    fake = FakeNet()
+    fake.add("https://huggingface.co/api/models/org/private/tree/main/loras",
+             401, {}, b"")
+    vm.http_request = fake
+    with hf_token_env(None):
+        errors, _ = vm.check_urls(reg)
+    check(len(errors) == 1 and "HF_TOKEN" in errors[0] and "private" in errors[0].lower(),
+          f"token: a failed listing with no HF_TOKEN says the repo may be private "
+          f"and no token was supplied (got {errors})")
+    check(all("org/private" in e for e in errors),
+          "token: and still names the repo that could not be listed")
+
+    fake = FakeNet()
+    fake.add("https://huggingface.co/api/models/org/private/tree/main/loras",
+             403, {}, b"")
+    vm.http_request = fake
+    with hf_token_env("hf_liveSECRETtokenvalue"):
+        errors, _ = vm.check_urls(reg)
+    check(len(errors) == 1 and "403" in errors[0]
+          and "hf_liveSECRETtokenvalue" not in errors[0],
+          f"token: with a token set the error blames the token's access, and never "
+          f"prints the token (got {errors})")
+
+
+def test_token_never_reaches_an_error_string():
+    """CLAUDE.md section 3: a raw exception is a leak channel. These messages are
+    printed into CircleCI output and, on a pod, into $NETWORK_VOLUME/comfyui.log."""
+    secret = "hf_liveSECRETtokenvalue"
+
+    def raiser(url, range_first_byte=False):
+        raise RuntimeError(f"tls error sending Authorization: Bearer {secret} to {url}")
+
+    vm.http_request = raiser
+    with hf_token_env(secret):
+        hf_errors, _ = vm.check_urls(
+            {"a.safetensors": hf_entry("a.safetensors", "loras", repo="org/private")})
+        r2_errors, _ = vm.check_urls(
+            {"b.safetensors": {"url": "https://r2.example.com/b.safetensors?sig=1",
+                               "subdir": "loras"}})
+    check(hf_errors and not any(secret in e for e in hf_errors),
+          f"token: an exception quoting the token is scrubbed on the HF path (got {hf_errors})")
+    check(r2_errors and not any(secret in e for e in r2_errors),
+          f"token: and on the non-HF path too (got {r2_errors})")
+    check(vm.scrub_token("nothing secret here") == "nothing secret here",
+          "token: scrub_token leaves an innocent string alone")
+
+
 def main() -> int:
     tests = [
         test_subgraph_walk,
@@ -630,6 +800,7 @@ def main() -> int:
         test_template_schema_accepts_both_real_shapes,
         test_template_schema_accepts_entrypoint_keys,
         test_template_schema_accepts_comfy_extra_args,
+        test_template_schema_accepts_jupyter,
         test_template_schema_rejects_unknown_top_level_key,
         test_template_schema_rejects_unknown_flag_key,
         test_template_schema_rejects_unknown_swap_group_and_profile_shape,
@@ -638,6 +809,11 @@ def main() -> int:
         test_allowlists_suppress_warnings,
         test_offline_and_exit_codes,
         test_prose_is_not_a_filename,
+        test_bearer_header_present_when_hf_token_set,
+        test_no_bearer_header_without_hf_token,
+        test_bearer_header_never_leaves_huggingface,
+        test_private_repo_listing_failure_names_the_missing_token,
+        test_token_never_reaches_an_error_string,
     ]
     for t in tests:
         t()

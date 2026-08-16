@@ -460,6 +460,46 @@ def test_template_sections_injected_when_present():
            "template sections must not leak into troubleshooting")
 
 
+def test_jupyter_section_follows_the_template():
+    """The welcome note must not advertise a port nothing answers on.
+
+    template.json "jupyter": false means the runtime never launches
+    JupyterLab (src/start.sh:192,:207) and the client's RunPod template
+    publishes 8188 only, so the "JupyterLab and your pod URL" section is a
+    lie on that pod. Default and "jupyter": true keep it verbatim: the four
+    live templates carry no such key.
+    """
+    for template_extra, want in (({}, True),
+                                 ({"jupyter": True}, True),
+                                 ({"jupyter": False}, False),
+                                 ({"jupyter": "False"}, False),
+                                 ({"jupyter": "no"}, True)):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            manifest, status, hf = clean_model_fixtures(d)
+            root = d / "wf"
+            render(d, manifest_entries=manifest, provision_status=status,
+                   hf_status=hf, template={**TEMPLATE, **template_extra},
+                   notes_root=root)
+            md = note_md(root, "Welcome")
+            got = "JupyterLab and your pod URL" in md
+            ok(got == want,
+               f"template {template_extra}: JupyterLab section present={got}, "
+               f"want {want}")
+            ok(("8888" in md) == want,
+               f"template {template_extra}: port 8888 must only be named when "
+               f"JupyterLab actually runs")
+            ok(("JUPYTER_TOKEN" in md) == want,
+               f"template {template_extra}: JUPYTER_TOKEN advice must only "
+               f"appear when JupyterLab actually runs")
+            # Whatever happens to that section, the rest of the note survives.
+            ok("How to generate" in md,
+               f"template {template_extra}: the rest of the note must survive")
+            ok("<!--" not in md,
+               f"template {template_extra}: no section marker may reach the "
+               f"customer: {md!r}")
+
+
 def test_no_em_or_en_dashes_anywhere():
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
@@ -573,6 +613,7 @@ def main():
     test_gate_both_ways_note_written_with_zero_flags()
     test_off_entries_land_in_the_note()
     test_template_sections_injected_when_present()
+    test_jupyter_section_follows_the_template()
     test_no_em_or_en_dashes_anywhere()
     test_end_to_end_with_the_real_provisioner()
     print(f"boot report self-test: all good ({CHECKS} assertions)")

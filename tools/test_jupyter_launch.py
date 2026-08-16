@@ -58,9 +58,15 @@ MARK_START = "# >>> JUPYTER-LAUNCH"
 MARK_END = "# <<< JUPYTER-LAUNCH"
 
 # The live public templates. None of them carries a "jupyter" key, and all four
-# must keep launching JupyterLab byte for byte as they do today.
+# must keep launching JupyterLab byte for byte as they do today. They are
+# SIBLING repos: present on a dev machine, absent in CI, which checks out
+# comfyui-runtime alone. A missing sibling CHECKOUT skips that template (see
+# test_live_templates_are_untouched); a checkout that is present but missing
+# its template.json is a real failure and still goes red.
 LIVE_TEMPLATES = ("comfyui-wan", "comfyui-minimax", "comfyui-qwen-image",
                   "comfyui-ltx2")
+
+SKIPPED = []
 
 NO_FILE = object()  # template.json absent entirely (start.sh:36-40 degraded boot)
 
@@ -324,8 +330,18 @@ def test_only_false_disables():
 def test_live_templates_are_untouched():
     """The no-regression claim, made against the real files rather than a
     reconstruction of them: none of the four carries the key, and each one
-    still produces the historical command line."""
+    still produces the historical command line.
+
+    Reads sibling repos, so it only runs where they are checked out. A sibling
+    whose repo directory does not exist at all is skipped and announced — that
+    is CI, which clones comfyui-runtime alone. Anything else keeps failing:
+    a checkout that exists but has no template.json, and every assertion
+    below."""
     for name in LIVE_TEMPLATES:
+        if not (FAMILY / name).is_dir():
+            SKIPPED.append(f"test_live_templates_are_untouched[{name}] "
+                           f"(sibling repo not checked out at {FAMILY / name})")
+            continue
         path = FAMILY / name / "template.json"
         ok(path.is_file(), f"{path} is missing; adjust the test, not the pod")
         doc = json.loads(path.read_text())
@@ -393,7 +409,14 @@ def main():
     test_live_templates_are_untouched()
     test_the_note_agrees_with_the_launch()
     test_the_key_is_allowlisted_in_the_validator()
-    print(f"jupyter launch self-test: all good ({CHECKS} assertions)")
+    for note in SKIPPED:
+        print(f"jupyter launch self-test: SKIPPED {note}")
+    if len(SKIPPED) == len(LIVE_TEMPLATES):
+        print("jupyter launch self-test: WARNING none of the four live "
+              "templates was checked — no sibling repo is checked out beside "
+              "comfyui-runtime, so the no-regression guard did not run here")
+    print(f"jupyter launch self-test: all good ({CHECKS} assertions, "
+          f"{len(SKIPPED)} skipped)")
 
 
 if __name__ == "__main__":

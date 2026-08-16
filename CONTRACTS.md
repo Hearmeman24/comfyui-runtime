@@ -321,7 +321,19 @@ pins, sage on/off").
       "https://github.com/spacepxl/ComfyUI-VAE-Utils.git|force"
     ]
   },
-  "sage": true                           // false skips the whole sage phase: no install, no probe
+  "sage": true,                          // false skips the whole sage phase: no install, no probe
+  "jupyter": true                        // optional, default TRUE; only false — in any case, the
+                                         //   value is lowercased — skips the JupyterLab launch
+                                         //   entirely (`src/start.sh` :192,:207, the
+                                         //   JUPYTER-LAUNCH block). Case-insensitive because this
+                                         //   is a security switch: the feature it turns off IS the
+                                         //   exposure, so "False" must not quietly leave an
+                                         //   unauthenticated shell running. Opt OUT, unlike "sage":
+                                         //   the four public templates carry no such key and must
+                                         //   keep launching it. For private client pods that
+                                         //   publish 8188 only — leaving 8888 off the RunPod
+                                         //   template hides the proxy route but still runs and
+                                         //   binds the process.
 }
 ```
 

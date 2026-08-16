@@ -41,7 +41,10 @@ Network checks (skipped with --offline). Never a bare HEAD:
          gated repo answers 401 whether or not the file exists, so it can
          never detect a deleted file; that blind spot let a renamed IC-LoRA
          (LipDub -> DubIt) sit broken while CI stayed green. Repo renames are
-         followed and named in the error.
+         followed and named in the error. A PRIVATE repo does not serve that
+         listing unauthenticated, so when HF_TOKEN is set in the environment
+         the request carries it as a bearer token (huggingface.co only); with
+         no token the failure says so instead of just "could not list".
        - any other URL gets a ranged GET (Range: bytes=0-0, expecting 206
          with Content-Range). Presigned R2/S3 signatures are method-scoped,
          so a HEAD answers 403 on a GET-signed URL.
@@ -65,8 +68,10 @@ Stdlib only. Usage:
 from __future__ import annotations  # PEP 604 syntax under python < 3.10
 import argparse
 import json
+import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
@@ -118,6 +123,11 @@ TEMPLATE_KEYS = frozenset({
     # A per-template workaround for an upstream ComfyUI bug belongs here rather
     # than in a RunPod form field, so it travels with the repo and is reviewable.
     "comfy_extra_args",
+    # jupyter: default true; false (in any case) skips the JupyterLab launch
+    # entirely, start.sh :192,:207 (the JUPYTER-LAUNCH block). Private client
+    # pods publish 8188 only, and an unpublished port still leaves the process
+    # running and bound.
+    "jupyter",
 })
 # per flag: folders/workflows (walk) and copy (registry) at provisioner.py
 # :199,:206,:221; default :329; extra_models :402. (CONTRACTS.md section 5b)
@@ -135,11 +145,54 @@ HF_RESOLVE_RE = re.compile(
 
 # ---------------------------------------------------------------- network ---
 
+def hf_token() -> str | None:
+    """The caller's HF token, or None. Read at call time rather than at import
+    so a test can set and clear it, and so an empty string is 'no token'."""
+    return os.environ.get("HF_TOKEN") or None
+
+
+def scrub_token(text: str) -> str:
+    """Remove the token from anything on its way to an error message.
+
+    Every message this module builds is printed by main() into CircleCI job
+    output, and the template shims run under the same rule as the downloader:
+    a raw exception is a leak channel (CLAUDE.md section 3). urllib does not
+    normally quote request headers back, but nothing guarantees that for every
+    transport error, and a leaked HF token is a live credential.
+    """
+    tok = hf_token()
+    return text.replace(tok, "<redacted HF_TOKEN>") if tok else text
+
+
+def _is_huggingface(url: str) -> bool:
+    """True only for https://huggingface.co and its subdomains.
+
+    http_request is also the presigned R2/S3 and Google Drive path, so the
+    bearer token is scoped by host: attaching a customer's HF token to a
+    third-party request would hand that host a live credential. urllib copies
+    request headers across redirects, and HF's tree API redirects only within
+    huggingface.co (the 307 a renamed repo issues), so the scope holds.
+    """
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or "").lower()
+    return parts.scheme == "https" and (host == "huggingface.co"
+                                        or host.endswith(".huggingface.co"))
+
+
 def http_request(url: str, range_first_byte: bool = False):
     """The single network seam; the self-test replaces this. GET only, never
     HEAD. Returns (status, headers, body, final_url). HTTP error statuses are
-    returned, not raised; transport errors raise."""
-    req = urllib.request.Request(url, headers=dict(UA))
+    returned, not raised; transport errors raise.
+
+    Carries Authorization: Bearer $HF_TOKEN when the environment has one, which
+    is what lets a client template validate assets in a PRIVATE HF repo; the
+    public four run with no token set and are unaffected.
+    """
+    headers = dict(UA)
+    token = hf_token()
+    if token and _is_huggingface(url):
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
     if range_first_byte:
         req.add_header("Range", "bytes=0-0")
     try:
@@ -161,8 +214,9 @@ def _next_link(headers: dict) -> str | None:
 
 
 def hf_tree_listing(repo: str, rev: str, dirpath: str) -> tuple[str, dict]:
-    """(landed_repo, {path_in_repo: size}) from the public HF model API tree
-    listing, which is public even for gated repos. urllib follows the 307 a
+    """(landed_repo, {path_in_repo: size}) from the HF model API tree listing,
+    which is public even for gated repos -- but NOT for private ones, which need
+    the HF_TOKEN bearer header http_request adds. urllib follows the 307 a
     renamed repo issues; recover where we landed so the error can name it."""
     url = f"https://huggingface.co/api/models/{repo}/tree/{rev}"
     if dirpath:
@@ -494,7 +548,16 @@ def check_url(name: str, entry: dict, registry: dict):
         try:
             landed, files = hf_tree_listing(repo, rev, dirpath)
         except Exception as e:  # noqa: BLE001
-            return f"{name}: could not list {repo}: {e}", None
+            detail = scrub_token(str(e))
+            # The tree listing is public for a GATED repo but not for a PRIVATE
+            # one, so on a client template every asset fails here and "could not
+            # list" names the symptom rather than the cause.
+            if hf_token() is None:
+                return (f"{name}: could not list {repo}: {detail}. No HF_TOKEN is set, "
+                        f"so a private repo cannot be listed - set HF_TOKEN in the CI "
+                        f"environment if {repo} is private"), None
+            return (f"{name}: could not list {repo}: {detail}. HF_TOKEN is set, so "
+                    f"check that token can read {repo}"), None
         if fpath not in files:
             if landed.lower() != repo.lower():
                 return (f"{name}: '{fpath}' not in {landed} - {repo} was renamed to {landed} "
@@ -508,7 +571,8 @@ def check_url(name: str, entry: dict, registry: dict):
     except Exception as e:  # noqa: BLE001
         # Some transport errors quote the URL back in their own message, so
         # the exception text is a leak channel too.
-        return f"{name}: {str(e).replace(url, redact(url))} - {redact(url)}", None
+        return (f"{name}: {scrub_token(str(e).replace(url, redact(url)))} "
+                f"- {redact(url)}"), None
     if status == 206:
         cr = re.match(r"bytes\s+\d+-\d+/(\d+)", headers.get("Content-Range", ""))
         size = int(cr.group(1)) if cr else None

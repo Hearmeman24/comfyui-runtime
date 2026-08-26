@@ -140,6 +140,7 @@ def run_loop(template_json: dict, runtime_nodes, existing=()):
 A = "https://github.com/Hearmeman24/ComfyUI-HearmemanAI-Upscale.git"
 B = "https://github.com/kijai/ComfyUI-KJNodes.git"
 C = "https://github.com/rgthree/rgthree-comfy.git"
+OPENROUTER_SIMPLE = "https://github.com/Hearmeman24/ComfyUI-OpenRouter-Simple.git"
 
 
 # --- tests ------------------------------------------------------------------
@@ -225,6 +226,8 @@ def test_the_shipped_runtime_nodes_file_is_valid():
     ok(isinstance(data, list), f"it is a JSON array (got {type(data).__name__})")
     ok(all(isinstance(x, str) and x.startswith("https://") for x in data),
        "every entry is an https URL string")
+    ok(data.count(OPENROUTER_SIMPLE) == 1,
+       "OpenRouter Simple is declared exactly once in the shipped runtime list")
     names = [x.split("|")[0].rsplit("/", 1)[-1] for x in data]
     ok(len(names) == len(set(names)), f"no two entries share a directory name ({names})")
 

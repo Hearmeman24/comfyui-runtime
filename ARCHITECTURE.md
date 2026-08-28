@@ -123,6 +123,11 @@ template still boots. **Never delete a flag a customer may have saved.**
 **`auto_download`** is a *suppression* list, not a download list: models the node packs fetch
 themselves, named here so the boot report stops calling them missing.
 
+**`PERSIST_MODELS_TO_VOLUME`** is the operator opt-out for the detached local-stage-to-volume copy.
+It defaults on; only a trimmed, case-insensitive literal `false` leaves locally staged models on the
+pod's disk. This does not change stage selection: models that cannot fit locally still stage and land
+directly on the volume, and deployments without a network volume already land on container disk.
+
 **`custom_nodes.repos`** are the packs *this* template clones at boot. Packs that every template
 should have go in `src/runtime_nodes.json` in this repo instead (`CONTRACTS.md` §5e) — one push and
 a `stable` promotion reaches all of them, rather than an identical one-line PR per template repo.

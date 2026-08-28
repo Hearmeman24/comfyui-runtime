@@ -740,7 +740,11 @@ Boot order (donor citations against minimax/wan; architecture.md §3):
     `:303-307`, with `LORAS_DIR` actually defined, which neither donor does).
 13. Wait on backgrounded pip installs; onnxruntime CUDA-provider boot re-check and reinstall if
     clobbered (wan `:431-440`; stays per plan §5c: it guards boot-time installs).
-14. `source $TEMPLATE_DIR/src/hooks/pre_launch.sh` if present (§7).
+14. `source $TEMPLATE_DIR/src/hooks/pre_launch.sh` if present (§7). Then, when the manifest still
+    contains live local-stage symlinks, start detached `volume_sync.py` unless
+    `PERSIST_MODELS_TO_VOLUME` is a stripped, case-insensitive literal `false`. The default is to
+    persist. Disabling this copy leaves those symlinks usable for the current pod but non-durable;
+    models that fell back to volume-side staging are already real volume files and are unaffected.
 15. Sage join: `wait` on the step 6 subshell, read the verdict files, set `SAGE_FLAG` and record
     the `sage` / `sage_msg` report keys (a missing verdict fails safe to `probe_failed`). The
     launch line interpolates `SAGE_FLAG`, so the join MUST precede it. Then launch, once,
@@ -789,6 +793,7 @@ Not called by `start.sh`; listed so slices E and D freeze the same surface.
 | `CHECKPOINT_IDS_TO_DOWNLOAD`, `LORAS_IDS_TO_DOWNLOAD` | `replace_with_ids` | CivitAI ID lists (wan `start.sh:260-263`) |
 | `civitai_token` / `CIVITAI_TOKEN` / `CIVITAI_API_KEY` | unset | all three accepted (`CLAUDE.md` §3) |
 | `HF_LOCAL_STAGE` | `/hf_stage` | where models download to and live until `volume_sync.py` copies them to the volume |
+| `PERSIST_MODELS_TO_VOLUME` | `true` | background-copy locally staged models to the network volume; only a stripped, case-insensitive literal `false` disables it. Has no effect without a network volume or on models that stage directly on the volume |
 | `COMFY_EXTRA_ARGS` | unset | appended verbatim to the ComfyUI launch, word-split. Escape hatch for upstream bugs without cutting a tag; echoed at boot when set (`src/start.sh:628-637`) |
 | per-template flags, quant/precision/variant envs | per `template.json` | §3, §5 |
 | `CUDA_VARIANT` | dead at boot | the sage path no longer reads it (selection is by `torch.version.cuda`, plan D9); the env survives only as a Docker build ARG in templates |

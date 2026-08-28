@@ -756,6 +756,7 @@ fi
 #
 # Survives because start.sh ends in sleep infinity, so nothing reaps it. Output
 # goes to the pod's stdout (where the user reads it) and to the volume log.
+# >>> VOLUME-SYNC-LAUNCH
 if python3 - "$HF_QUEUE_FILE" <<'PY'
 import os, sys
 from pathlib import Path
@@ -778,12 +779,27 @@ then
         echo "📦 Models are on disk and usable now; no network volume, so nothing to copy."
         report_kv volume_sync skipped_no_volume
     else
-        echo "📦 Models are on local disk and usable now; copying them to your network volume in the background."
-        nohup python3 "$RUNTIME_DIR/src/volume_sync.py" "$HF_QUEUE_FILE" \
-            > >(tee -a "$NETWORK_VOLUME/comfyui.log") 2>&1 &
-        report_kv volume_sync running
+        # Opt out only on a trimmed, case-insensitive literal "false". A typo
+        # must not silently make models non-durable. This controls persistence,
+        # not stage selection: HF_STAGE_LOCAL keeps its existing meaning.
+        PERSIST_MODELS_TO_VOLUME_ENABLED="$(python3 - <<'PY'
+import os
+raw = os.environ.get("PERSIST_MODELS_TO_VOLUME", "").strip().lower()
+print("false" if raw == "false" else "true")
+PY
+)"
+        if [ "$PERSIST_MODELS_TO_VOLUME_ENABLED" = "false" ]; then
+            echo "📦 PERSIST_MODELS_TO_VOLUME=false: leaving locally staged models on this pod only; they will download again after its local disk is discarded."
+            report_kv volume_sync disabled_by_env
+        else
+            echo "📦 Models are on local disk and usable now; copying them to your network volume in the background."
+            nohup python3 "$RUNTIME_DIR/src/volume_sync.py" "$HF_QUEUE_FILE" \
+                > >(tee -a "$NETWORK_VOLUME/comfyui.log") 2>&1 &
+            report_kv volume_sync running
+        fi
     fi
 fi
+# <<< VOLUME-SYNC-LAUNCH
 
 # --- comfy extra args: begin -------------------------------------------------
 # Extra launch flags, from two sources, concatenated in this order:

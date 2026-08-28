@@ -859,43 +859,102 @@ fi
 
 # Launch ComfyUI ONCE, nohup'ed, never restarted to add a flag. Never pipe
 # the launch to tee while capturing $! (that names tee, not python;
-# CLAUDE.md section 6). No PID is captured here at all.
+# CLAUDE.md section 6). The direct background launch makes $! the Python PID,
+# which is the authoritative startup-failure signal below.
 echo "▶️  Starting ComfyUI"
 # shellcheck disable=SC2086  # all three are deliberately word-split
 nohup python3 "$COMFYUI_DIR/main.py" --listen --enable-cors-header '*' \
     $SAGE_FLAG $EXTRA_PATHS_FLAG $COMFY_EXTRA_ARGS \
     > "$NETWORK_VOLUME/comfyui_${RUNPOD_POD_ID}_nohup.log" 2>&1 &
+COMFYUI_PID=$!
+COMFYUI_LOG="$NETWORK_VOLUME/comfyui_${RUNPOD_POD_ID}_nohup.log"
 
-# Liveness check, then the numbered self-serve triage block.
+# --- comfyui liveness: begin ------------------------------------------------
+# Port readiness says the server is usable; the captured Python PID says
+# whether startup is still possible. Do not grep for "error" or "Traceback":
+# custom-node import failures can be recoverable while ComfyUI continues to a
+# usable server. The log is progress/diagnostic context, never the state owner.
+comfyui_troubleshooting() {
+    echo ""
+    echo "🛠️  Troubleshooting Tips:"
+    if [ "$TORCH_CUDA_MAJOR" = "13" ]; then
+        echo "1. This is a CUDA 13 image. Make sure your CUDA Version is set to 13.0+ in the additional filters tab before deploying."
+    else
+        echo "1. Make sure that your CUDA Version is set to 12.8/12.9 by selecting that in the additional filters tab before deploying the template."
+    fi
+    echo "2. If you are deploying using network storage, try deploying without it."
+    echo "3. If the log above shows \"Could not resolve host\", RunPod's Global Networking setting is enabled on this pod. Deploy a new pod with Global Networking DISABLED."
+    echo "4. If all else fails, open the web terminal by clicking \"connect\", \"enable web terminal\" and running:"
+    echo "   cat $COMFYUI_LOG"
+    echo "   This should show a ComfyUI error. Please paste the error in HearmemanAI Discord Server for assistance."
+    if [ "$COMFYUI_VERSION" != "approved" ]; then
+        echo "Note: this pod is running COMFYUI_VERSION=$COMFYUI_VERSION. Set COMFYUI_VERSION=approved and restart to return to the validated ComfyUI."
+    fi
+    echo ""
+    echo "📋 Startup logs location: $COMFYUI_LOG"
+}
+
+comfyui_latest_log_line() {
+    tail -n 20 "$COMFYUI_LOG" 2>/dev/null \
+        | awk 'NF { latest = $0 } END { print latest }' \
+        | cut -c1-300
+}
+
+COMFYUI_LIVENESS="starting"
 counter=0
-max_wait=70
-until curl --silent --fail "$URL" --output /dev/null; do
-    if [ $counter -ge $max_wait ]; then
-        echo "⚠️  ComfyUI should be up by now. If it's not running, there's probably an error."
-        echo ""
-        echo "🛠️  Troubleshooting Tips:"
-        if [ "$TORCH_CUDA_MAJOR" = "13" ]; then
-            echo "1. This is a CUDA 13 image. Make sure your CUDA Version is set to 13.0+ in the additional filters tab before deploying."
-        else
-            echo "1. Make sure that your CUDA Version is set to 12.8/12.9 by selecting that in the additional filters tab before deploying the template."
-        fi
-        echo "2. If you are deploying using network storage, try deploying without it."
-        echo "3. If the log above shows \"Could not resolve host\", RunPod's Global Networking setting is enabled on this pod. Deploy a new pod with Global Networking DISABLED."
-        echo "4. If all else fails, open the web terminal by clicking \"connect\", \"enable web terminal\" and running:"
-        echo "   cat comfyui_${RUNPOD_POD_ID}_nohup.log"
-        echo "   This should show a ComfyUI error. Please paste the error in HearmemanAI Discord Server for assistance."
-        if [ "$COMFYUI_VERSION" != "approved" ]; then
-            echo "Note: this pod is running COMFYUI_VERSION=$COMFYUI_VERSION. Set COMFYUI_VERSION=approved and restart to return to the validated ComfyUI."
-        fi
-        echo ""
-        echo "📋 Startup logs location: $NETWORK_VOLUME/comfyui_${RUNPOD_POD_ID}_nohup.log"
+poll_interval=5
+slow_after=70
+progress_interval=30
+next_progress=0
+
+while :; do
+    if curl --silent --fail --max-time 2 "$URL" --output /dev/null; then
+        COMFYUI_LIVENESS="ready"
         break
     fi
 
-    echo "🔄  ComfyUI Starting Up... You can view the startup logs here: $NETWORK_VOLUME/comfyui_${RUNPOD_POD_ID}_nohup.log"
-    sleep 2
-    counter=$((counter + 2))
+    if ! kill -0 "$COMFYUI_PID" 2>/dev/null; then
+        wait "$COMFYUI_PID" 2>/dev/null
+        COMFYUI_EXIT_CODE=$?
+        COMFYUI_LIVENESS="failed"
+        echo "❌ ComfyUI process exited with code $COMFYUI_EXIT_CODE before port 8188 became ready."
+        if [ -s "$COMFYUI_LOG" ]; then
+            echo "📋 Last 20 startup log lines:"
+            tail -n 20 "$COMFYUI_LOG"
+        fi
+        comfyui_troubleshooting
+        break
+    fi
+
+    if [ "$counter" -ge "$next_progress" ]; then
+        if [ "$counter" -ge "$slow_after" ]; then
+            echo "🔄  ComfyUI is still starting after ${counter}s (process $COMFYUI_PID is running)."
+            latest_log_line="$(comfyui_latest_log_line)"
+            if [ -n "$latest_log_line" ]; then
+                echo "    Latest log: $latest_log_line"
+            fi
+            echo "    Full log: $COMFYUI_LOG"
+            next_progress=$((counter + progress_interval))
+        else
+            echo "🔄  ComfyUI Starting Up... You can view the startup logs here: $COMFYUI_LOG"
+            next_progress=$((counter + progress_interval))
+            if [ "$next_progress" -gt "$slow_after" ]; then
+                next_progress=$slow_after
+            fi
+        fi
+    fi
+
+    sleep "$poll_interval"
+    counter=$((counter + poll_interval))
 done
+
+if [ "$COMFYUI_LIVENESS" = "ready" ]; then
+    report_kv ready true
+else
+    report_kv ready false
+    report_warn "ComfyUI process exited with code ${COMFYUI_EXIT_CODE:-unknown} before port 8188 became ready after ${counter}s"
+fi
+# --- comfyui liveness: end --------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Deployment report (EXECUTION.md item N1), replacing the old "ComfyUI is
@@ -906,12 +965,6 @@ done
 # on EVERY boot regardless of flags so its report always describes THIS boot.
 # The note bypasses the provisioner's flag-gated copy on purpose.
 # ---------------------------------------------------------------------------
-if curl --silent --fail "$URL" --output /dev/null; then
-    report_kv ready true
-else
-    report_kv ready false
-    report_warn "ComfyUI did not answer on port 8188 within ${max_wait}s"
-fi
 python3 "$RUNTIME_DIR/src/boot_report.py" \
     --state "$BOOT_STATE" \
     --template "$TEMPLATE_JSON" \

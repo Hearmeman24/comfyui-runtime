@@ -756,8 +756,15 @@ Boot order (donor citations against minimax/wan; architecture.md §3):
         > "$NETWORK_VOLUME/comfyui_${RUNPOD_POD_ID}_nohup.log" 2>&1 &
     ```
 
-    (minimax `:330-332`), then the curl liveness loop, the numbered triage block, `sleep infinity`
-    (minimax `:334-370`).
+    (minimax `:330-332`). Capture `$!` from that direct background launch: it is the Python PID,
+    because the launch is not piped through `tee`. Poll localhost port 8188 every 5 seconds. While
+    the PID is alive, elapsed time alone is never a failure; at 70 seconds the progress wording
+    changes to **still starting**, includes the latest non-empty startup-log line, and continues at
+    a rate-limited interval. If the port opens, record `ready=true`. If the PID exits first, print
+    its exit code, the last 20 log lines and the numbered triage block, then record `ready=false`.
+    Log text is diagnostic only: never classify failure by grepping `error` or `Traceback`, because
+    recoverable custom-node import failures can appear during a successful boot. Finish with
+    `sleep infinity` so a failed pod stays inspectable (original donor shape: minimax `:334-370`).
 
 `PERSIST_ROOT` layout, env var names and flag semantics are FROZEN (spec §5): existing customer
 volumes mount unmodified.

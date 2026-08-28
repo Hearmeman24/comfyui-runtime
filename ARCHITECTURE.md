@@ -128,6 +128,12 @@ It defaults on; only a trimmed, case-insensitive literal `false` leaves locally 
 pod's disk. This does not change stage selection: models that cannot fit locally still stage and land
 directly on the volume, and deployments without a network volume already land on container disk.
 
+**ComfyUI startup liveness is process-aware.** The runtime polls port 8188 every 5 seconds and
+captures the Python PID from its one direct `nohup` launch. Seventy seconds changes the message to
+**still starting** and adds the latest meaningful log line; it is not a failure deadline. A start is
+failed only when that PID exits before the port opens. Log text supplies context rather than the
+verdict, because recoverable custom-node errors can appear during a successful boot.
+
 **`custom_nodes.repos`** are the packs *this* template clones at boot. Packs that every template
 should have go in `src/runtime_nodes.json` in this repo instead (`CONTRACTS.md` §5e) — one push and
 a `stable` promotion reaches all of them, rather than an identical one-line PR per template repo.

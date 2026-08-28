@@ -300,10 +300,11 @@ def test_not_ready_header_never_claims_ready():
         d = Path(td)
         rows = [r for r in CLEAN_STATE if r[1] != "ready"]
         rows += [("set", "ready", "false"),
-                 ("warn", "ComfyUI did not answer on port 8188 within 70s")]
+                 ("warn", "ComfyUI process exited with code 1 before port 8188 became ready after 35s")]
         out = render(d, rows)
         ok("is ready" not in out, out)
         ok("ComfyUI FAILED to start" in out, out)
+        ok("process exited with code 1" in out, out)
 
 
 def test_missing_pod_id_prints_port_not_a_broken_url():

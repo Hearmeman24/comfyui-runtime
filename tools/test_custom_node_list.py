@@ -141,6 +141,7 @@ A = "https://github.com/Hearmeman24/ComfyUI-HearmemanAI-Upscale.git"
 B = "https://github.com/kijai/ComfyUI-KJNodes.git"
 C = "https://github.com/rgthree/rgthree-comfy.git"
 OPENROUTER_SIMPLE = "https://github.com/Hearmeman24/ComfyUI-OpenRouter-Simple.git"
+CIVITAI_PUBLISHER = "https://github.com/Hearmeman24/ComfyUI-CivitAI-Publisher.git"
 
 
 # --- tests ------------------------------------------------------------------
@@ -228,6 +229,8 @@ def test_the_shipped_runtime_nodes_file_is_valid():
        "every entry is an https URL string")
     ok(data.count(OPENROUTER_SIMPLE) == 1,
        "OpenRouter Simple is declared exactly once in the shipped runtime list")
+    ok(data.count(CIVITAI_PUBLISHER) == 1,
+       "CivitAI Publisher is declared exactly once in the shipped runtime list")
     names = [x.split("|")[0].rsplit("/", 1)[-1] for x in data]
     ok(len(names) == len(set(names)), f"no two entries share a directory name ({names})")
 

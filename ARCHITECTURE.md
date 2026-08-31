@@ -82,7 +82,7 @@ would have stripped them from every running pod. **Merge and tag together.**
 `pins.json` names a **branch**, not a SHA:
 
 ```json
-{ "runtime_ref": "stable", "base_image": "hearmeman/comfyui-base:cu130-comfy0.32.0-torch2.11.0" }
+{ "runtime_ref": "stable", "base_image": "hearmeman/comfyui-base:cu130-comfy0.34.0-torch2.11.0" }
 ```
 
 `start_script.sh` does `git fetch origin "$RUNTIME_REF"` then `reset --hard FETCH_HEAD`, which

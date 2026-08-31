@@ -55,11 +55,11 @@ CLEAN_STATE = [
     ("set", "template_name", "comfyui-wan"),
     ("set", "pod_id", "abc123"),
     ("set", "ready", "true"),
-    ("set", "comfy_version", "0.32.0"),
+    ("set", "comfy_version", "0.34.0"),
     ("set", "comfy_sha", "c2bcbecd82ec5ae66594340b395c24ef0217b238"),
     ("set", "comfy_mode", "approved"),
     ("set", "runtime_sha", "28a4ca1f00000000000000000000000000000000"),
-    ("set", "base_image", "hearmeman/comfyui-base:cu128-comfy0.32.0-torch2.11.0"),
+    ("set", "base_image", "hearmeman/comfyui-base:cu128-comfy0.34.0-torch2.11.0"),
     ("set", "gpu_name", "NVIDIA H200"),
     ("set", "sage", "enabled"),
     ("set", "sage_msg", "SageAttention probe passed on sm90"),
@@ -167,9 +167,9 @@ def test_clean_boot_is_compact():
                      hf_status=hf, template=TEMPLATE)
         ok("ComfyUI is ready   https://abc123-8188.proxy.runpod.net" in out,
            f"header/URL missing:\n{out}")
-        ok("  ComfyUI    v0.32.0 (approved)" in out, out)
+        ok("  ComfyUI    v0.34.0 (approved)" in out, out)
         ok("  Runtime    comfyui-runtime @ 28a4ca1" in out, out)
-        ok("  Base       cu128-comfy0.32.0-torch2.11.0" in out, out)
+        ok("  Base       cu128-comfy0.34.0-torch2.11.0" in out, out)
         ok("  GPU        NVIDIA H200 (sm90)" in out, out)
         ok("  SageAttn   enabled (sm90, baked wheel)" in out, out)
         ok("  Models     3/3 downloaded" in out, out)

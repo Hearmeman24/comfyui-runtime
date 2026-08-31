@@ -349,8 +349,8 @@ def render_note(skeleton_path, sections_path, kv, offs, report,
 
 def note_workflow(md: str, title: str, seq: int) -> dict:
     """A one-node workflow in the UI format: a single MarkdownNote. The node
-    type is registered by comfyui-frontend-package 1.48.7, the exact frontend
-    ComfyUI v0.32.0 pins (requirements.txt at that tag); MarkdownNote is a
+    type is registered by comfyui-frontend-package 1.49.6, the exact frontend
+    ComfyUI v0.34.0 pins (requirements.txt at that tag); MarkdownNote is a
     virtual frontend node with its text in widgets_values[0], the same shape
     the tree's own blueprints ship. A note-only workflow has no API format."""
     return {

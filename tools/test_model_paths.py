@@ -13,7 +13,7 @@ spec D5). What must hold:
     controlnet (t2i_adapter is NOT in map_legacy and must never be a key)
   - custom_nodes and datasets hang off base_path, not models_dir, and are
     never emitted as models/<cat>
-  - on ANY derivation failure the frozen v0.32.0 superset (28 dirs) is
+  - on ANY derivation failure the frozen v0.34.0 superset (28 dirs) is
     printed instead (exit 3), never an empty or partial list
   - in start.sh, the mkdir loop and the yaml come from the SAME derived list,
     and template.json extra_model_paths entries stay accepted and additive
@@ -43,15 +43,15 @@ REPO = Path(__file__).resolve().parents[1]
 MP = REPO / "src" / "model_paths.py"
 START = REPO / "src" / "start.sh"
 
-# A real ComfyUI v0.32.0 clone, when one is around (dev machines). CI does not
+# A real ComfyUI v0.34.0 clone, when one is around (dev machines). CI does not
 # have it; those tests skip with a notice. Override with COMFYUI_TREE=<dir>.
 REAL_TREE = Path(os.environ.get("COMFYUI_TREE", "")) if os.environ.get(
     "COMFYUI_TREE") else Path("/nonexistent/comfyui-tree")
 
-# The full derivation against v0.32.0's folder_paths.py, in registration
+# The full derivation against v0.34.0's folder_paths.py, in registration
 # order: 27 keys, 25 of them models_dir-based, yielding these 28 dirs.
 # This is also, verbatim, the frozen fallback model_paths.py must ship.
-EXPECTED_V0320 = [
+EXPECTED_V0340 = [
     ("checkpoints", "checkpoints"),
     ("configs", "configs"),
     ("loras", "loras"),
@@ -171,11 +171,11 @@ def make_stub_tree(root, folder_paths_src=STUB_FOLDER_PATHS):
 
 # --- model_paths.py ---------------------------------------------------------
 
-def test_fallback_flag_is_the_frozen_v0320_list():
+def test_fallback_flag_is_the_frozen_v0340_list():
     rc, pairs, _ = run_mp("--fallback")
     ok(rc == 0, f"--fallback must exit 0, got {rc}")
-    ok(pairs == EXPECTED_V0320,
-       f"--fallback must print the frozen v0.32.0 list verbatim, got {pairs}")
+    ok(pairs == EXPECTED_V0340,
+       f"--fallback must print the frozen v0.34.0 list verbatim, got {pairs}")
 
 
 def test_fallback_invariants():
@@ -204,9 +204,9 @@ def test_real_tree_derivation():
         return
     rc, pairs, err = run_mp(str(REAL_TREE))
     ok(rc == 0, f"derivation against the real tree must exit 0: {rc} {err}")
-    ok(pairs == EXPECTED_V0320,
-       f"real-tree derivation diverged from the expected v0.32.0 list:\n"
-       f"got      {pairs}\nexpected {EXPECTED_V0320}")
+    ok(pairs == EXPECTED_V0340,
+       f"real-tree derivation diverged from the expected v0.34.0 list:\n"
+       f"got      {pairs}\nexpected {EXPECTED_V0340}")
 
 
 def test_stub_tree_derivation():
@@ -222,7 +222,7 @@ def test_missing_tree_falls_back():
     with tempfile.TemporaryDirectory() as tmp:
         rc, pairs, err = run_mp(tmp)  # no folder_paths.py at all
         ok(rc == 3, f"failed derivation must exit 3, got {rc}")
-        ok(pairs == EXPECTED_V0320, "fallback list must be printed on failure")
+        ok(pairs == EXPECTED_V0340, "fallback list must be printed on failure")
         ok("fallback" in err.lower(), f"stderr must say the fallback ran: {err}")
 
 
@@ -231,13 +231,13 @@ def test_broken_tree_falls_back():
         tree = make_stub_tree(tmp, 'raise RuntimeError("boom at import")\n')
         rc, pairs, _ = run_mp(str(tree))
         ok(rc == 3, f"an import-time crash must exit 3, got {rc}")
-        ok(pairs == EXPECTED_V0320, "fallback list must be printed on failure")
+        ok(pairs == EXPECTED_V0340, "fallback list must be printed on failure")
 
 
 def test_bad_usage_still_prints_the_list():
     rc, pairs, _ = run_mp()  # no args: never emit nothing, never abort
     ok(rc == 3, f"bad usage must exit 3, got {rc}")
-    ok(pairs == EXPECTED_V0320, "fallback list must be printed on bad usage")
+    ok(pairs == EXPECTED_V0340, "fallback list must be printed on bad usage")
 
 
 # --- the start.sh block -----------------------------------------------------
@@ -387,9 +387,9 @@ def test_block_falls_back_when_derivation_fails():
         persist, comfy, warns, flag = run_block(empty)
         _, mapping = parse_yaml(comfy)
         dirs = yaml_model_dirs(mapping)
-        ok(sorted(dirs) == sorted(v for _, v in EXPECTED_V0320),
+        ok(sorted(dirs) == sorted(v for _, v in EXPECTED_V0340),
            f"fallback must declare the full frozen list, got {sorted(dirs)}")
-        ok(created_model_dirs(persist) == sorted(set(v for _, v in EXPECTED_V0320)),
+        ok(created_model_dirs(persist) == sorted(set(v for _, v in EXPECTED_V0340)),
            "fallback mkdir list must match the yaml")
         ok(any("fallback" in w.lower() for w in warns),
            f"the boot report must learn the fallback ran: {warns}")

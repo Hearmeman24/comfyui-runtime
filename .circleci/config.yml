@@ -75,7 +75,7 @@ commands:
             IMG="docker.io/$DOCKERHUB_USER/comfyui-base"
 
             # Tag grammar (CONTRACTS.md section 6, plan section 5c "Tagging"):
-            #   <cuNNN>-comfy<ref>-torch<ver>, e.g. cu128-comfy0.32.0-torch2.11.0
+            #   <cuNNN>-comfy<ref>-torch<ver>, e.g. cu128-comfy0.34.0-torch2.11.0
             # COMFYUI_REF comes from the ARG default in base/Dockerfile (the
             # base owns the ComfyUI version choice); torch ver from the
             # canonical trio file. Fail loudly if either is unreadable rather
@@ -91,8 +91,8 @@ commands:
               exit 1
             fi
             # Strip a leading "v" from the ComfyUI ref for the tag only. The ARG
-            # itself must stay a valid git ref (v0.32.0), but CONTRACTS.md section 6
-            # specifies the tag form as cu128-comfy0.32.0-torch2.11.0, without it.
+            # itself must stay a valid git ref (v0.34.0), but CONTRACTS.md section 6
+            # specifies the tag form as cu128-comfy0.34.0-torch2.11.0, without it.
             COMFY_REF_TAG="${COMFY_REF#v}"
             TAG="${VARIANT}-comfy${COMFY_REF_TAG}-torch${TORCH_VER}"
             echo "Building ${IMG}:${TAG}"

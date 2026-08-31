@@ -332,7 +332,7 @@ report_kv comfy_mode "$COMFYUI_VERSION"
 # categories must come from the tree that will actually run. The yaml is
 # written from the SAME list that is mkdir'd: every declared path must exist
 # before launch or ComfyUI dies in prestartup (CLAUDE.md section 9).
-# On any derivation failure model_paths.py prints a frozen v0.32.0 superset
+# On any derivation failure model_paths.py prints a frozen v0.34.0 superset
 # instead (exit 3) and the boot report says so; the list is never empty and
 # boot never aborts (decision #19).
 MODEL_PATHS_TSV="$(python3 "$RUNTIME_DIR/src/model_paths.py" "$COMFYUI_DIR")"

@@ -2,7 +2,7 @@
 """Derive the extra_model_paths category list from the pinned ComfyUI tree.
 
 start.sh used to hand-manage a frozen 14-category list; it drifted every time
-ComfyUI grew a category (14 in wan's day, 27 keys in v0.32.0). This helper
+ComfyUI grew a category (14 in wan's day, 27 keys in v0.34.0). This helper
 asks the ComfyUI tree that will actually run: it imports folder_paths from
 the given directory and emits one "key<TAB>relpath" line per registered dir
 under models_dir. Multi-dir keys emit one line per dir, which is how the
@@ -20,7 +20,7 @@ bespoke base_path-relative line.
 
 Usage:
     model_paths.py <comfyui_dir>    derive from the tree (exit 0)
-    model_paths.py --fallback       print the frozen v0.32.0 superset (exit 0)
+    model_paths.py --fallback       print the frozen v0.34.0 superset (exit 0)
 
 On ANY failure (bad args, missing/broken tree, unexpected layout) the frozen
 fallback is printed and the exit code is 3: start.sh report_warns on 3 but
@@ -32,11 +32,11 @@ Stdlib only; importable and runnable without a pod (tools/test_model_paths.py).
 import os
 import sys
 
-# The full derivation against ComfyUI v0.32.0 (folder_paths.py:25-67), frozen
-# 2026-08-13: 25 models_dir keys, 28 dirs. test_model_paths.py checks this
-# against a live derivation when COMFYUI_TREE points at a v0.32.0 tree, and
+# The full derivation against ComfyUI v0.34.0 (folder_paths.py:25-67), frozen
+# 2026-08-31: 25 models_dir keys, 28 dirs. test_model_paths.py checks this
+# against a live derivation when COMFYUI_TREE points at a v0.34.0 tree, and
 # skips loudly when it does not (CI has no tree). Treat the list as frozen to
-# v0.32.0: it is the fallback, not a moving mirror of whatever ComfyUI is
+# v0.34.0: it is the fallback, not a moving mirror of whatever ComfyUI is
 # checked out. Rebuild it deliberately when the base image's COMFYUI_REF moves.
 FALLBACK = (
     ("checkpoints", "checkpoints"),
@@ -78,7 +78,7 @@ def derive(comfy_dir):
     if not os.path.isfile(os.path.join(comfy_dir, "folder_paths.py")):
         raise FileNotFoundError("no folder_paths.py in %s" % comfy_dir)
     # comfy.cli_args parses argv at import when args_parsing is on; a bare
-    # argv keeps the import inert either way (spec D5, probed on v0.32.0).
+    # argv keeps the import inert either way (spec D5, probed on v0.34.0).
     sys.argv = [sys.argv[0] if sys.argv else "model_paths"]
     sys.path.insert(0, comfy_dir)
     import folder_paths
@@ -118,7 +118,7 @@ def main(argv):
         pairs = derive(argv[1])
     except Exception as exc:
         print("model_paths: derivation from %s failed (%r); printing the "
-              "frozen v0.32.0 fallback list" % (argv[1], exc), file=sys.stderr)
+              "frozen v0.34.0 fallback list" % (argv[1], exc), file=sys.stderr)
         emit(FALLBACK)
         return 3
     emit(pairs)

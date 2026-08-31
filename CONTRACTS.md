@@ -1,18 +1,18 @@
 # CONTRACTS.md - frozen interfaces for the comfyui-runtime fan-out
 
-Status: FROZEN for the step-0 build (spec `docs/specs/2026-08-12-shared-runtime-scaffold/spec.claude.md`, §7).
-Six slice agents code against this file. Do not edit it mid-fan-out; a change here means re-briefing every slice.
+Status: FROZEN. Shared runtime and template consumers code against this file.
+Changing it requires coordinating every consumer.
 
 How to read this file:
 
 - Every claim about how the family behaves today carries a `file:line` citation into the read-only
   template repos checked out alongside this one.
-- Where the approved plan (`plan.md` v4) deliberately changes current behavior, the change is listed in
+- Where the shared runtime deliberately changes prior behavior, the change is listed in
   §12 so nobody "fixes" it back.
 - Judgement calls the spec did not settle are marked inline as `> DECISION NEEDED:` for the maintainer to scan.
 - No file in any `comfyui-*` template repo is modified by any slice. They are sources to port from.
 
-Repo layout being built (plan.md §2):
+Repository layout:
 
 ```
 comfyui-runtime/

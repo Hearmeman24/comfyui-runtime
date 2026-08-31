@@ -2,9 +2,8 @@
 
 How to build, gate, publish and consume the two universal SageAttention
 wheels. Written to be re-run cold months from now: follow it top to bottom,
-do not improvise steps. Source of truth for the design is
-`docs/specs/2026-08-12-shared-runtime-scaffold/plan.md` section 5 and
-`CONTRACTS.md` section 10.
+do not improvise steps. The source of truth for the design is this runbook
+together with `CONTRACTS.md` section 10.
 
 ## What this produces
 
@@ -25,7 +24,7 @@ can emit (sm86 needs no cubin, it uses the triton JIT path):
 The tag grammar is `sage-<SAGE_COMMIT short>-<cuNNN>-torch<version>`. The two
 wheels share a filename, so each lives in its own Release tag.
 
-The wheel is a one-off durable artifact (plan D7). It is consumed unchanged
+The wheel is a one-off durable artifact. It is consumed unchanged
 by `base/Dockerfile` (both wheels `ADD`ed into every base image) and never
 built per template, per deployment, or at boot.
 

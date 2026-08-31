@@ -4,3 +4,4 @@ tools/__pycache__/
 .DS_Store
 dist/
 MIGRATION_GOTCHAS.md
+/docs/specs/

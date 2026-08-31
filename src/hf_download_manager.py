@@ -495,7 +495,7 @@ def run_job(job: Job, lock: threading.Lock) -> None:
                 #
                 # Safe because ComfyUI resolves models with os.path.isfile,
                 # which follows symlinks, and carries no containment check on
-                # that path (folder_paths.py:449-458 at v0.32.0).
+                # that path (folder_paths.py:441-458 at v0.34.0).
                 #
                 # Link via a .partial name + os.replace so publishing is atomic
                 # even when something already occupies dest.

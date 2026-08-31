@@ -18,7 +18,7 @@
 # is COPYed in), so always build with `-f base/Dockerfile` from the repo root.
 #
 # Tag grammar (plan.md 5c): hearmeman/comfyui-base:<cuNNN>-comfy<ref>-torch<ver>
-# e.g. cu128-comfy0.32.0-torch2.11.0. A torch or ComfyUI bump means a new tag;
+# e.g. cu128-comfy0.34.0-torch2.11.0. A torch or ComfyUI bump means a new tag;
 # old tags are immutable rollbacks.
 #
 # A CUDA_VARIANT / CUDA_BASE_IMAGE mismatch is caught by the sage assertion
@@ -34,7 +34,7 @@ ARG CUDA_VARIANT
 # ComfyUI pin. Must be a branch or tag name (the clone below uses --branch).
 # The base tag carries this ref, and COMFYUI_VERSION=approved restores to it
 # at boot via /comfyui-approved-ref (plan.md 5b).
-ARG COMFYUI_REF=v0.32.0
+ARG COMFYUI_REF=v0.34.0
 
 # Consolidated environment variables (comfyui-wan/Dockerfile:22-26, byte-similar
 # in all four templates).
@@ -131,7 +131,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # kept ONLY for consistency with every existing image's custom_nodes layout.
 # It does NOT control load order, despite what the template Dockerfiles claim:
 # ComfyUI iterates custom_nodes with a bare os.listdir() and no sorted()
-# (nodes.py:2353 on master and on v0.32.0), so load order is filesystem order,
+# (nodes.py:2353-2356 on v0.34.0), so load order is filesystem order,
 # effectively arbitrary on overlayfs (plan.md 5c, load-order note).
 RUN --mount=type=cache,target=/root/.cache/pip \
     git clone --depth=1 https://github.com/ltdrdata/ComfyUI-Manager.git \

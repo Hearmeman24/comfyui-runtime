@@ -364,7 +364,7 @@ never again drift from the ComfyUI the image actually runs. Every registered dir
 `datasets` hang off `base_path`, are excluded from the models emission, and `custom_nodes` keeps
 its bespoke base_path-relative yaml line. The derivation runs AFTER the `COMFYUI_VERSION` phase,
 so the categories come from the tree that will actually run. On any derivation failure
-`model_paths.py` prints a frozen v0.32.0 superset (28 dirs) instead and the boot report warns; the
+`model_paths.py` prints a frozen v0.34.0 superset (28 dirs) instead and the boot report warns; the
 list is never empty and boot never aborts. The yaml is still written from the SAME list that is
 `mkdir -p`'d, and the `template.json` `extra_model_paths` key above stays accepted and additive
 (node packs that read their own dirs outside `folder_paths`); with every native category derived,
@@ -561,7 +561,7 @@ Per-template, repo root. Exactly two keys (plan D2):
 ```json
 {
   "runtime_ref": "4f0c9a1e...40-hex-sha",
-  "base_image": "hearmeman/comfyui-base:cu130-comfy0.32.0-torch2.11.0"
+  "base_image": "hearmeman/comfyui-base:cu130-comfy0.34.0-torch2.11.0"
 }
 ```
 
@@ -574,7 +574,7 @@ Per-template, repo root. Exactly two keys (plan D2):
 - `start.sh` prints both values at boot so every support log names them (plan D2).
 
 Base tag grammar: `hearmeman/comfyui-base:<cuNNN>-comfy<ref>-torch<ver>` (plan §5c "Tagging"), e.g.
-`cu128-comfy0.32.0-torch2.11.0`.
+`cu128-comfy0.34.0-torch2.11.0`.
 
 ---
 

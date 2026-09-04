@@ -29,7 +29,8 @@ template-repo/
 ```
 
 Everything else — downloading, provisioning, the boot script, the boot report, the validator, the
-SageAttention build, CivitAI env resolution — lives here and is identical on every pod.
+SageAttention build, CivitAI env resolution, and the vendored CivitAI downloader — lives here and
+is identical on every pod.
 
 The rule that keeps it that way: **the runtime is a program, `template.json` is its configuration.**
 When something cannot be expressed in `template.json`, that is the signal to extend the schema, not
@@ -42,8 +43,7 @@ to add bespoke code to one template.
 1. RunPod starts the container. The entrypoint is `src/start_script.sh`, **baked into the image**.
 2. It fetches the *template* repo's default branch and hard-resets to it, in a 5-attempt retry loop
    with backoff. On total failure it falls back to the on-disk copy and says so.
-3. It reads `pins.json`, clones **this repo** at `runtime_ref`, and copies the runtime scripts in.
-   Same retry loop, same fallback.
+3. It reads `pins.json` and resets **this repo** to `runtime_ref`. Same retry loop, same fallback.
 4. It `exec`s this repo's `src/start.sh`, which owns everything from there: DNS preflight, node
    packs, provisioning, downloads, SageAttention, the boot report, and the ComfyUI launch.
 
@@ -96,6 +96,25 @@ This is deliberate. The alternative — a SHA per template — means four PRs to
 and four chances to forget one. The cost is that there is **no per-template gate**: a bad `stable`
 reaches all four on the next boot. So verify against all four templates before promoting, not just
 the one you were working in.
+
+### The CivitAI downloader follows the runtime
+
+`vendor/civitai_downloader/download_with_aria.py` is the canonical executable source for CivitAI
+LoRA and checkpoint downloads. `src/civitai_downloads.sh` validates its recorded checksum and
+syntax, verifies the pinned pure-Python requirement, and then invokes it explicitly with `python3`
+from that absolute runtime path. It never resolves the command through `PATH`, never uses a stale
+`/usr/local/bin` copy left in an older image, and never clones a second repository at boot.
+
+The dependency check is lazy: pods that request no CivitAI IDs do not install anything. When a
+download is requested and the exact dependency pin is absent, the runtime installs
+`vendor/civitai_downloader/requirements.txt` before any background dependency install can begin.
+Missing, corrupt, or dependency-broken runtime state records a warning and skips only the requested
+CivitAI downloads; ComfyUI boot continues. Every scheduled child PID is joined directly, so
+concurrent failures are reported without relying on a global `pgrep aria2c` race.
+
+Because the downloader and its launcher are both in the fetched checkout, moving `stable` selects
+them together. A rollback selects the older checkout's downloader on the next boot. Existing
+running processes remain unchanged until restart, and neither direction requires an image build.
 
 ---
 
@@ -164,7 +183,9 @@ If this is more than a day's work, the runtime has failed its purpose. In order:
   validator *errors* on a loader naming anything else that is not in the registry, so a personal
   model cannot leak into a shipped workflow again.
 - **Canonical CivitAI env names** are `civitai_token`, `CIVITAI_LORAS`, `CIVITAI_CHECKPOINTS`.
-  `src/civitai_env.sh` keeps every legacy name working and prints a rename notice.
+  `src/civitai_env.sh` keeps every legacy name working and prints a rename notice. The
+  `CIVITAI_API_KEY` alias is mapped to the canonical token and then removed before the downloader
+  can spawn aria2c.
 - **Never bake a token into an image.** Customer-supplied only.
 - **Never remove a registry entry an env value maps to.** Use `deprecated_flags`.
 - **The repo must stay blob-free.** Every pod clones it on every boot, so repo size is boot time.

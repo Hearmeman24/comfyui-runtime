@@ -43,5 +43,9 @@ resolve_civitai_env() {
         && [ -n "${CIVITAI_API_KEY:-}" ]; then
         CIVITAI_TOKEN="$CIVITAI_API_KEY"
     fi
+    # CIVITAI_API_KEY is an accepted input alias, not a downstream credential
+    # name. Drop it after resolution so the canonical downloader receives the
+    # selected token while its aria2c child cannot inherit this legacy alias.
+    unset CIVITAI_API_KEY
     export CIVITAI_LORAS CIVITAI_CHECKPOINTS CIVITAI_TOKEN civitai_token
 }

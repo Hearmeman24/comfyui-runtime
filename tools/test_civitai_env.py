@@ -45,6 +45,7 @@ def resolve(env):
         'printf "CHECKPOINTS=%s\\n" "$CIVITAI_CHECKPOINTS"\n'
         'printf "TOKEN=%s\\n" "$CIVITAI_TOKEN"\n'
         'printf "token_lc=%s\\n" "$civitai_token"\n'
+        'printf "API_KEY_SET=%s\\n" "${CIVITAI_API_KEY+x}"\n'
     )
     r = subprocess.run(["bash", "-c", script], env={"PATH": "/usr/bin:/bin",
                                                     **env},
@@ -120,6 +121,8 @@ def test_placeholder_counts_as_unset():
 def test_api_key_maps_to_token():
     v, w = resolve({"CIVITAI_API_KEY": "sk-abc"})
     ok(v["TOKEN"] == "sk-abc", v)
+    ok(v["API_KEY_SET"] == "", "the legacy alias must be removed before "
+       f"the downloader spawns aria2c: {v}")
 
 
 def test_existing_token_wins_over_api_key():
@@ -127,6 +130,8 @@ def test_existing_token_wins_over_api_key():
     ok(v["token_lc"] == "sk-low", v)
     ok(v["TOKEN"] == "", f"CIVITAI_TOKEN must stay empty when the downloader "
                          f"already sees civitai_token: {v}")
+    ok(v["API_KEY_SET"] == "", "unused CIVITAI_API_KEY must not survive into "
+       f"the downloader environment: {v}")
 
 
 def main():

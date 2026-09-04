@@ -404,6 +404,13 @@ else
 fi
 # --- derived model paths: end ----------------------------------------------
 
+# Prepare the runtime-owned CivitAI downloader before any background pip
+# installs can start. This is a no-op unless IDs were requested; the actual
+# transfers remain after the HF download phase.
+# shellcheck disable=SC1091
+source "$RUNTIME_DIR/src/civitai_downloads.sh"
+prepare_civitai_downloads_if_requested
+
 # ---------------------------------------------------------------------------
 # SageAttention (CONTRACTS.md sections 8/9, plan D9; EXECUTION.md E10).
 # The wheel install and the kernel probe run in ONE background subshell so
@@ -464,22 +471,6 @@ else
     report_kv sage off_template
 fi
 # --- sage install + probe: end ----------------------------------------------
-
-# CivitAI downloader: baked at /usr/local/bin by the base image; the clone is
-# ONLY an if-missing fallback for images built before the base exists
-# (CONTRACTS.md section 9 step 7). Failure is not fatal: only the CivitAI ID
-# downloads depend on it.
-if [ ! -x /usr/local/bin/download_with_aria.py ]; then
-    echo "CivitAI downloader missing from the image. Fetching to /usr/local/bin..."
-    rm -rf /tmp/CivitAI_Downloader
-    if git clone "https://github.com/Hearmeman24/CivitAI_Downloader.git" /tmp/CivitAI_Downloader; then
-        mv /tmp/CivitAI_Downloader/download_with_aria.py /usr/local/bin/ \
-            && chmod +x /usr/local/bin/download_with_aria.py
-    else
-        echo "⚠️  CivitAI downloader clone failed. CHECKPOINT/LORAS ID downloads will not work this boot."
-    fi
-    rm -rf /tmp/CivitAI_Downloader
-fi
 
 # ---------------------------------------------------------------------------
 # Custom-node clone loop, from TWO sources merged in one place:
@@ -654,57 +645,12 @@ if [ "$downloader_rc" -ne 0 ]; then
     echo "❌ Download manager exited $downloader_rc: one or more model downloads FAILED (the failed entries are named in the snapshot above). Booting anyway."
 fi
 
-# CivitAI ID downloads (minimax start.sh:227-263, with LORAS_DIR actually
-# defined, which neither donor does). Canonical env names are CIVITAI_LORAS
-# and CIVITAI_CHECKPOINTS; civitai_env.sh keeps every legacy name working.
-# shellcheck disable=SC1091
-source "$RUNTIME_DIR/src/civitai_env.sh"
-resolve_civitai_env
-CHECKPOINTS_DIR="$PERSIST_ROOT/models/checkpoints"
-LORAS_DIR="$PERSIST_ROOT/models/loras"
-declare -A MODEL_CATEGORIES=(
-    ["$CHECKPOINTS_DIR"]="${CIVITAI_CHECKPOINTS:-replace_with_ids}"
-    ["$LORAS_DIR"]="${CIVITAI_LORAS:-replace_with_ids}"
-)
-
-download_count=0
-for TARGET_DIR in "${!MODEL_CATEGORIES[@]}"; do
-    mkdir -p "$TARGET_DIR"
-    MODEL_IDS_STRING="${MODEL_CATEGORIES[$TARGET_DIR]}"
-
-    # Skip if unset or still the RunPod template placeholder.
-    if [[ -z "$MODEL_IDS_STRING" || "$MODEL_IDS_STRING" == "replace_with_ids" ]]; then
-        echo "⏭️  Skipping CivitAI downloads for $TARGET_DIR (no IDs set)"
-        continue
-    fi
-
-    IFS=',' read -ra MODEL_IDS <<< "$MODEL_IDS_STRING"
-    for MODEL_ID in "${MODEL_IDS[@]}"; do
-        MODEL_ID="${MODEL_ID// /}"
-        [ -z "$MODEL_ID" ] && continue
-        sleep 1
-        echo "🚀 Scheduling CivitAI download: $MODEL_ID to $TARGET_DIR"
-        (cd "$TARGET_DIR" && download_with_aria.py -m "$MODEL_ID") &
-        ((download_count++))
-    done
-done
-
-if [ "$download_count" -gt 0 ]; then
-    echo "📋 Scheduled $download_count CivitAI downloads in background"
-    echo "⏳ Waiting for CivitAI downloads to complete..."
-    while pgrep -x "aria2c" > /dev/null; do
-        echo "🔽 CivitAI downloads still in progress..."
-        sleep 5
-    done
-    echo "✅ CivitAI downloads finished"
-fi
-
-# CivitAI serves some LoRAs as zips (minimax start.sh:303-307).
-for zip_file in "$LORAS_DIR"/*.zip; do
-    [ -e "$zip_file" ] || continue
-    echo "Renaming $(basename "$zip_file") to .safetensors"
-    mv "$zip_file" "${zip_file%.zip}.safetensors"
-done
+# CivitAI downloads are runtime-owned. The helper validates the vendored
+# snapshot, installs its pinned pure-Python dependency only when requested,
+# invokes it by absolute runtime path, and joins every scheduled PID. A stale
+# /usr/local/bin/download_with_aria.py in an older image is intentionally
+# ignored; moving runtime_ref selects this whole stage and its downloader.
+run_civitai_downloads "$PERSIST_ROOT"
 
 # Workspace as main working directory for the Jupyter terminal.
 grep -qxF "cd $NETWORK_VOLUME" ~/.bashrc 2>/dev/null || echo "cd $NETWORK_VOLUME" >> ~/.bashrc

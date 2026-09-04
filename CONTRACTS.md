@@ -17,6 +17,8 @@ Repository layout:
 ```
 comfyui-runtime/
   src/hf_download_manager.py   slice A
+  src/civitai_downloads.sh      CivitAI runtime launcher and child lifecycle
+  vendor/civitai_downloader/    checksummed downloader snapshot + provenance
   src/provisioner.py           slice B
   src/start.sh                 slice C
   src/sage_probe.py            slice C
@@ -699,16 +701,19 @@ Boot order (donor citations against minimax/wan; architecture.md §3):
 5. `COMFYUI_VERSION` handling: resolve target (`approved` reads `/comfyui-approved-ref`; `latest`
    calls the releases API; explicit ref as-is), compare `git rev-parse HEAD`, move only on mismatch,
    never move on resolve failure (plan §5b).
-6. Sage phase, only when `template.json` `"sage": true` (plan D9; EXECUTION.md E10): read
+6. CivitAI downloader preparation is deferred until IDs are requested. The authoritative source is
+   `/comfyui-runtime/vendor/civitai_downloader/download_with_aria.py`, selected with the runtime
+   checkout. `src/civitai_downloads.sh` validates its `SHA256SUMS`, compiles the source, verifies the
+   exact pin in `requirements.txt`, and installs that requirement only when it does not match. This
+   finishes before any background `pip` process can start. A missing, corrupt, or dependency-broken
+   snapshot warns and skips only CivitAI downloads. There is no boot-time downloader clone and no
+   `/usr/local/bin` fallback.
+7. Sage phase, only when `template.json` `"sage": true` (plan D9; EXECUTION.md E10): read
    `torch.version.cuda` major synchronously, then background ONE subshell doing
    `pip install --no-deps --force-reinstall /opt/sage/cu<128|130>/sageattention-*.whl` ->
    `python3 /comfyui-runtime/src/sage_probe.py`, writing the probe's exit code and message to
-   `/tmp/sage_verdict.rc` / `/tmp/sage_verdict.msg`. The subshell overlaps steps 7 through 14 and
+   `/tmp/sage_verdict.rc` / `/tmp/sage_verdict.msg`. The subshell overlaps steps 8 through 14 and
    is joined in step 15, where exit 0 sets `SAGE_FLAG="--use-sage-attention"`.
-7. CivitAI downloader: baked at `/usr/local/bin/download_with_aria.py` by the base image (donor
-   `comfyui-qwen-image/Dockerfile` bake; plan §5c); `start.sh` keeps the git clone ONLY as an
-   if-missing fallback for images built before the base exists (today's every-boot clone:
-   wan `start.sh:144-148`).
 8. Custom-node clone loop from `template.json` (`custom_nodes.repos`, syntax §5), then their
    requirements installs (backgrounded, PIDs collected and waited before launch, wan `:199-217,
    413-429`).
@@ -734,10 +739,14 @@ Boot order (donor citations against minimax/wan; architecture.md §3):
     ```
 
     Nonzero: print one line naming the count of failures; boot continues.
-12. CivitAI ID downloads (`CHECKPOINT_IDS_TO_DOWNLOAD` / `LORAS_IDS_TO_DOWNLOAD` env, comma-split,
-    `replace_with_ids` placeholder skipped): `(cd "$TARGET_DIR" && download_with_aria.py -m "$MODEL_ID") &`
-    then the aria2c wait loop (minimax `:227-263`); zip-to-safetensors rename after (minimax
-    `:303-307`, with `LORAS_DIR` actually defined, which neither donor does).
+12. CivitAI ID downloads use canonical `CIVITAI_CHECKPOINTS` / `CIVITAI_LORAS` after alias
+    resolution; comma-separated model IDs, version IDs, AIR identifiers, and CivitAI URLs are
+    passed unchanged as `--identifier`, with `--output` naming the category directory. Each command
+    is exactly `python3 /comfyui-runtime/vendor/civitai_downloader/download_with_aria.py ...`; the
+    CivitAI token stays in the environment, never argv. The launcher records every child PID,
+    directly waits for each, reports each failed category, and returns nonzero after all children
+    finish if any failed. The failure is degraded: boot continues. The downloader's normal success
+    contract is exactly two structured lines (`INFO resolve`, `OK ready`).
 13. Wait on backgrounded pip installs; onnxruntime CUDA-provider boot re-check and reinstall if
     clobbered (wan `:431-440`; stays per plan §5c: it guards boot-time installs).
 14. `source $TEMPLATE_DIR/src/hooks/pre_launch.sh` if present (§7). Then, when the manifest still
@@ -797,8 +806,9 @@ Not called by `start.sh`; listed so slices E and D freeze the same surface.
 |---|---|---|
 | `COMFYUI_VERSION` | `approved` | plan §5b; `approved` actively restores to `/comfyui-approved-ref` |
 | `HF_TOKEN` | unset | user-supplied only; gates `gated` registry entries; never baked |
-| `CHECKPOINT_IDS_TO_DOWNLOAD`, `LORAS_IDS_TO_DOWNLOAD` | `replace_with_ids` | CivitAI ID lists (wan `start.sh:260-263`) |
-| `civitai_token` / `CIVITAI_TOKEN` / `CIVITAI_API_KEY` | unset | all three accepted (`CLAUDE.md` §3) |
+| `CIVITAI_CHECKPOINTS`, `CIVITAI_LORAS` | unset | canonical comma-separated CivitAI model/version/AIR/URL lists; `replace_with_ids` is treated as unset |
+| `CHECKPOINT_IDS_TO_DOWNLOAD`, `SDXL_MODEL_IDS_TO_DOWNLOAD`, `LORAS_IDS_TO_DOWNLOAD` | unset | accepted legacy aliases; canonical names win and a rename notice is recorded |
+| `civitai_token` / `CIVITAI_TOKEN` / `CIVITAI_API_KEY` | unset | all three accepted; `CIVITAI_API_KEY` is mapped then unset before downloader children start |
 | `HF_LOCAL_STAGE` | `/hf_stage` | where models download to and live until `volume_sync.py` copies them to the volume |
 | `PERSIST_MODELS_TO_VOLUME` | `true` | background-copy locally staged models to the network volume; only a stripped, case-insensitive literal `false` disables it. Has no effect without a network volume or on models that stage directly on the volume |
 | `COMFY_EXTRA_ARGS` | unset | appended verbatim to the ComfyUI launch, word-split. Escape hatch for upstream bugs without cutting a tag; echoed at boot when set (`src/start.sh:628-637`) |
@@ -844,8 +854,10 @@ Slice agents: these are DESIGN CHANGES, not oversights. Do not restore the old b
     already dropped it as all-defaults, `minimax start.sh:279-283`; minimax's shape wins).
 13. **ComfyUI is never mutated ad hoc at boot**: qwen's unconditional `git checkout master && git
     pull` (`comfyui-qwen-image/src/start.sh:92-95`) is replaced by `COMFYUI_VERSION` (plan §5b).
-14. **The every-boot CivitAI downloader clone** (`wan start.sh:144-148`) becomes a base-image bake
-    with an if-missing boot fallback (plan §5c).
+14. **The CivitAI downloader follows the runtime, not the image.** The former every-boot clone and
+    later base-image bake/fallback are both retired. A checksummed vendored snapshot and exact
+    dependency pin move with `runtime_ref`; an old baked `/usr/local/bin/download_with_aria.py` is
+    harmless because boot never invokes it.
 
 ---
 

@@ -179,16 +179,6 @@ RUN set -e; \
     pip install --no-deps /opt/sage/"$CUDA_VARIANT"/sageattention-*.whl; \
     python3 -c "import sageattention; print('sageattention import OK ($CUDA_VARIANT)')"
 
-# CivitAI downloader baked to /usr/local/bin at build time
-# (comfyui-qwen-image/Dockerfile:130-133; wan/minimax/ltx2 pay this git clone
-# on every boot instead, e.g. comfyui-wan/src/start.sh:144-148 - that boot
-# step dies family-wide, plan.md 5c; start.sh keeps a clone only as an
-# if-missing fallback for images built before this base existed).
-RUN git clone --depth=1 https://github.com/Hearmeman24/CivitAI_Downloader.git /tmp/civitai-dl \
-    && cp /tmp/civitai-dl/download_with_aria.py /usr/local/bin/ \
-    && chmod +x /usr/local/bin/download_with_aria.py \
-    && rm -rf /tmp/civitai-dl
-
 # ----------------------------------------------------------------------------
 # ORT_INDEX_ARGS, per variant. The base installs NO onnxruntime itself - node
 # requirements in the template layer would shadow it anyway (last install

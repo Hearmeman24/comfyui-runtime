@@ -1,8 +1,9 @@
 # comfyui-runtime
 
 Shared runtime for the HearmemanAI ComfyUI RunPod pod templates (wan, minimax, ltx2, qwen-image):
-the download manager, the model provisioner, the shared boot script, the model validator, the base
-image Dockerfile, and the SageAttention wheel build tooling.
+the download managers, the model provisioner, the shared boot script, the model validator, the base
+image Dockerfile, and the SageAttention wheel build tooling. The small CivitAI downloader is a
+checksummed, provenance-recorded runtime snapshot so `stable` controls its rollout and rollback.
 
 Templates do not vendor these files. Each template clones this repo at boot at the `runtime_ref`
 pinned in its own `pins.json` (alongside `base_image`). All four currently pin the **branch**
@@ -29,6 +30,8 @@ behind them. Read it before changing anything.
 |---|---|
 | `CONTRACTS.md` | Frozen interfaces and decisions |
 | `src/hf_download_manager.py` | Unified model downloader (HF, aria2c, gdown) |
+| `src/civitai_downloads.sh` | Validates, prepares, schedules, and joins runtime-owned CivitAI downloads |
+| `vendor/civitai_downloader/` | Canonical CivitAI downloader snapshot, dependency pin, checksum, license notice, and provenance |
 | `src/provisioner.py` | Registry walker, workflow copier, quant rewrite |
 | `src/start.sh` | Shared boot script |
 | `src/sage_probe.py` | SageAttention kernel probe |
@@ -41,3 +44,6 @@ behind them. Read it before changing anything.
 ## License
 
 AGPL-3.0, inherited from ComfyUI. See `LICENSE`.
+
+The vendored CivitAI downloader retains its upstream MIT declaration and provenance under
+`vendor/civitai_downloader/`.

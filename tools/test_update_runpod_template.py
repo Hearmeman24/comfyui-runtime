@@ -3,9 +3,25 @@
 
 from __future__ import annotations
 
+import io
+import json
 import unittest
 
-from update_runpod_template import PromotionError, Template, parse_template_ids, promote
+from update_runpod_template import (
+    PromotionError,
+    RunPodClient,
+    Template,
+    parse_template_ids,
+    promote,
+)
+
+
+class FakeResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
 
 
 class FakeClient:
@@ -22,12 +38,37 @@ class FakeClient:
             self.mismatch_on = None
         return Template(template_id, self.names[template_id], image)
 
-    def set_image(self, template_id: str, image_name: str) -> None:
-        self.writes.append((template_id, image_name))
-        self.images[template_id] = image_name
+    def set_image(self, template: Template, image_name: str) -> None:
+        self.writes.append((template.id, image_name))
+        self.images[template.id] = image_name
 
 
 class PromotionTests(unittest.TestCase):
+    def test_client_uses_v2_image_field_and_partial_patch(self) -> None:
+        requests = []
+
+        def opener(request, timeout):
+            self.assertEqual(timeout, 30)
+            requests.append(request)
+            payload = {
+                "id": "aaaaaaaaaa",
+                "name": "Template A",
+                "image": "hearmeman/comfyui-qwen-template:v1",
+            }
+            return FakeResponse(json.dumps(payload).encode())
+
+        client = RunPodClient("secret", opener=opener)
+        template = client.get_template("aaaaaaaaaa")
+        client.set_image(template, "hearmeman/comfyui-qwen-template:v2")
+
+        self.assertEqual(requests[0].full_url, "https://api.runpod.io/v2/templates/aaaaaaaaaa")
+        self.assertEqual(requests[0].method, "GET")
+        self.assertEqual(requests[1].method, "PATCH")
+        self.assertEqual(
+            json.loads(requests[1].data),
+            {"image": "hearmeman/comfyui-qwen-template:v2"},
+        )
+
     def test_updates_every_allowlisted_template(self) -> None:
         client = FakeClient({"aaaaaaaaaa": "hearmeman/comfyui-qwen-template:v1", "bbbbbbbbbb": "hearmeman/comfyui-qwen-template:v2"})
         messages: list[str] = []

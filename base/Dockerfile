@@ -18,7 +18,7 @@
 # is COPYed in), so always build with `-f base/Dockerfile` from the repo root.
 #
 # Tag grammar (plan.md 5c): hearmeman/comfyui-base:<cuNNN>-comfy<ref>-torch<ver>
-# e.g. cu128-comfy0.34.0-torch2.11.0. A torch or ComfyUI bump means a new tag;
+# e.g. cu130-comfy0.36.0-3dd559d8-torch2.11.0. A torch or ComfyUI bump means a new tag;
 # old tags are immutable rollbacks.
 #
 # A CUDA_VARIANT / CUDA_BASE_IMAGE mismatch is caught by the sage assertion
@@ -31,10 +31,13 @@ ARG CUDA_VARIANT=cu128
 FROM ${CUDA_BASE_IMAGE} AS runtime-common
 ARG CUDA_VARIANT
 
-# ComfyUI pin. Must be a branch or tag name (the clone below uses --branch).
-# The base tag carries this ref, and COMFYUI_VERSION=approved restores to it
+# ComfyUI pin. Prefer an immutable 40-character commit SHA; tags also resolve.
+# The base tag carries a readable label, and COMFYUI_VERSION=approved restores to it
 # at boot via /comfyui-approved-ref (plan.md 5b).
-ARG COMFYUI_REF=v0.34.0
+# v0.36.0 predates native Qwen Image 2.1 support. This immutable post-release
+# upstream commit contains CORE-423 / PR #16400 and is the approved family pin.
+ARG COMFYUI_REF=3dd559d81f745747cab884a3b9f5fd8867d79efe
+ARG COMFYUI_IMAGE_REF=0.36.0-3dd559d8
 
 # Consolidated environment variables (comfyui-wan/Dockerfile:22-26, byte-similar
 # in all four templates).
@@ -107,7 +110,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install opencv-python
 
 # ----------------------------------------------------------------------------
-# ComfyUI at ${COMFYUI_REF}. Shallow clone for image size, BUT with the fetch
+# ComfyUI at ${COMFYUI_REF}. Fetch the exact ref into an empty repository so
+# both release tags and immutable commit SHAs are supported. Keep the checkout
+# shallow for image size, BUT repair the fetch
 # refspec repaired to full refs/heads/* plus tags afterwards. minimax's plain
 # `git clone --depth=1 --branch ${COMFYUI_REF}` (comfyui-minimax/
 # Dockerfile:104-107) leaves a single-ref refspec behind, producing a checkout
@@ -120,8 +125,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # requirements install runs under PIP_CONSTRAINT set above.
 # ----------------------------------------------------------------------------
 RUN --mount=type=cache,target=/root/.cache/pip \
-    git clone --depth=1 --branch ${COMFYUI_REF} \
-        https://github.com/comfyanonymous/ComfyUI.git /ComfyUI \
+    git init /ComfyUI \
+    && git -C /ComfyUI remote add origin https://github.com/comfyanonymous/ComfyUI.git \
+    && git -C /ComfyUI fetch --depth=1 origin ${COMFYUI_REF} \
+    && git -C /ComfyUI checkout --detach FETCH_HEAD \
+    && test "$(git -C /ComfyUI rev-parse HEAD)" = "${COMFYUI_REF}" \
+    && test -f /ComfyUI/comfy/ldm/qwen_image21/model.py \
+    && test -f /ComfyUI/comfy/text_encoders/qwen_image21.py \
     && git -C /ComfyUI config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' \
     && git -C /ComfyUI config --add remote.origin.fetch '+refs/tags/*:refs/tags/*' \
     && git -C /ComfyUI rev-parse HEAD > /comfyui-approved-ref \
@@ -131,7 +141,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # kept ONLY for consistency with every existing image's custom_nodes layout.
 # It does NOT control load order, despite what the template Dockerfiles claim:
 # ComfyUI iterates custom_nodes with a bare os.listdir() and no sorted()
-# (nodes.py:2353-2356 on v0.34.0), so load order is filesystem order,
+# (nodes.py in the approved v0.36.0 tree), so load order is filesystem order,
 # effectively arbitrary on overlayfs (plan.md 5c, load-order note).
 RUN --mount=type=cache,target=/root/.cache/pip \
     git clone --depth=1 https://github.com/ltdrdata/ComfyUI-Manager.git \

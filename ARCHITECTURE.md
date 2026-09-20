@@ -97,6 +97,19 @@ and four chances to forget one. The cost is that there is **no per-template gate
 reaches all four on the next boot. So verify against all four templates before promoting, not just
 the one you were working in.
 
+### Image tags promote their RunPod templates automatically
+
+Each active template's tag-only CircleCI workflow runs `verify` and `validate_models`, builds and
+pushes the immutable `vN` image, then invokes `tools/update_runpod_template.py` from the runtime
+ref pinned by that release. The deploy job carries an explicit allowlist of RunPod template IDs
+for that image family and is serialized per image repository.
+
+The deployer reads every allowlisted template before writing, rejects a template that points at a
+different image repository, patches only `imageName`, and reads the template back. If any update or
+verification fails, every template changed by that invocation is restored to its prior image. The
+`RUNPOD_API_KEY` comes only from the restricted `runpod-template-deploy` CircleCI context. Existing
+pods are not restarted; the promoted image applies to pods subsequently created from the template.
+
 ### The CivitAI downloader follows the runtime
 
 `vendor/civitai_downloader/download_with_aria.py` is the canonical executable source for CivitAI

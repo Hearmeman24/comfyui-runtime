@@ -105,8 +105,11 @@ ref pinned by that release. The deploy job carries an explicit allowlist of RunP
 for that image family and is serialized per image repository.
 
 The deployer reads every allowlisted template before writing, rejects a template that points at a
-different image repository, patches only `imageName`, and reads the template back. If any update or
-verification fails, every template changed by that invocation is restored to its prior image. The
+different image repository, changes only `image` through the v2 partial-update endpoint, and reads
+the template back. Do not use the legacy `rest.runpod.io/v1` template update endpoints: they return
+HTTP 500 for these public templates because the legacy records carry an empty registry credential.
+If any update or verification fails, every template changed by that invocation is restored to its
+prior image. The
 `RUNPOD_API_KEY` comes only from the restricted `runpod-template-deploy` CircleCI context. Existing
 pods are not restarted; the promoted image applies to pods subsequently created from the template.
 

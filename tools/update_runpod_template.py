@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable
 
 
-API_ROOT = "https://rest.runpod.io/v1"
+API_ROOT = "https://api.runpod.io/v2"
 IMAGE_RE = re.compile(
     r"^(?P<repo>[a-z0-9]+(?:[._/-][a-z0-9]+)*)"
     r":(?P<tag>v[0-9]+(?:\.[0-9]+)*)$"
@@ -52,8 +52,15 @@ class RunPodClient:
         self.api_root = api_root.rstrip("/")
         self.opener = opener
 
-    def _request(self, method: str, template_id: str, body: dict | None = None) -> dict:
-        url = f"{self.api_root}/templates/{template_id}"
+    def _request(
+        self,
+        method: str,
+        template_id: str,
+        body: dict | None = None,
+        *,
+        suffix: str = "",
+    ) -> dict:
+        url = f"{self.api_root}/templates/{template_id}{suffix}"
         data = None if body is None else json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             url,
@@ -94,7 +101,7 @@ class RunPodClient:
             result = Template(
                 id=payload["id"],
                 name=payload["name"],
-                image_name=payload["imageName"],
+                image_name=payload["image"],
             )
         except (KeyError, TypeError) as exc:
             raise PromotionError(
@@ -106,8 +113,8 @@ class RunPodClient:
             )
         return result
 
-    def set_image(self, template_id: str, image_name: str) -> None:
-        self._request("PATCH", template_id, {"imageName": image_name})
+    def set_image(self, template: Template, image_name: str) -> None:
+        self._request("PATCH", template.id, {"image": image_name})
 
 
 def parse_template_ids(raw: str) -> list[str]:
@@ -159,7 +166,7 @@ def promote(
             if template.image_name == desired_image:
                 emit(f"UNCHANGED {template.id} {template.name}: {desired_image}")
                 continue
-            client.set_image(template.id, desired_image)
+            client.set_image(template, desired_image)
             changed.append(template)
             actual = client.get_template(template.id).image_name
             if actual != desired_image:
@@ -175,7 +182,7 @@ def promote(
         rollback_failures: list[str] = []
         for template in reversed(changed):
             try:
-                client.set_image(template.id, template.image_name)
+                client.set_image(template, template.image_name)
                 restored = client.get_template(template.id).image_name
                 if restored != template.image_name:
                     raise PromotionError("rollback verification mismatch")

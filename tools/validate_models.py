@@ -136,7 +136,7 @@ FLAG_KEYS = frozenset({"folders", "workflows", "copy", "default", "extra_models"
 # (CONTRACTS.md section 5a)
 SWAP_GROUP_KEYS = frozenset({"env", "default", "flags", "profiles"})
 # custom_nodes: start.sh :425,:437.
-CUSTOM_NODES_KEYS = frozenset({"target", "repos"})
+CUSTOM_NODES_KEYS = frozenset({"target", "repos", "profile_repos"})
 
 # https://huggingface.co/<owner>/<repo>/resolve/<rev>/<path/in/repo>
 HF_RESOLVE_RE = re.compile(
@@ -437,6 +437,34 @@ def check_template_schema(template: dict) -> list[str]:
         errors.append("template.json: 'custom_nodes' must be an object")
     elif isinstance(nodes, dict):
         errors += _unknown_keys("custom_nodes", nodes, CUSTOM_NODES_KEYS)
+
+        profile_repos = nodes.get("profile_repos", {})
+        if not isinstance(profile_repos, dict):
+            errors.append("template.json: custom_nodes.profile_repos must be an object")
+        else:
+            raw_groups = template.get("swap_groups")
+            groups_by_env = {g.get("env"): g for g in (
+                raw_groups if isinstance(raw_groups, list) else [])
+                             if isinstance(g, dict)}
+            for env, profiles in profile_repos.items():
+                group = groups_by_env.get(env)
+                if group is None:
+                    errors.append(f"template.json: custom_nodes.profile_repos: "
+                                  f"unknown swap group {env!r}")
+                    continue
+                if not isinstance(profiles, dict):
+                    errors.append(f"template.json: custom_nodes.profile_repos "
+                                  f"for {env!r} must be an object")
+                    continue
+                for key, repos in profiles.items():
+                    if key not in group.get("profiles", {}):
+                        errors.append(f"template.json: custom_nodes.profile_repos "
+                                      f"for {env!r}: unknown profile {key!r}")
+                    if not isinstance(repos, list) or not all(
+                            isinstance(repo, str) and repo.startswith("https://")
+                            for repo in repos):
+                        errors.append(f"template.json: custom_nodes.profile_repos "
+                                      f"for {env!r}/{key!r} must be a list of HTTPS repos")
 
     groups = template.get("swap_groups")
     if groups is not None and not isinstance(groups, list):

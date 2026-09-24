@@ -62,6 +62,25 @@ else:
 PY
 }
 
+# Emit template node packs keyed to the same active precision profile used by
+# provisioner.py. Python's output contains repo entries only (no warnings).
+profile_custom_nodes_get() {
+    python3 - "$TEMPLATE_JSON" "$RUNTIME_DIR/src" <<'PY'
+import json
+import os
+import sys
+
+try:
+    sys.path.insert(0, sys.argv[2])
+    from provisioner import select_custom_node_repos
+    template = json.load(open(sys.argv[1]))
+    for entry in select_custom_node_repos(template, os.environ):
+        print(entry)
+except Exception as exc:
+    print(f"WARNING: skipping profile custom nodes: {exc}", file=sys.stderr)
+PY
+}
+
 # Print both pins so every support log names the runtime SHA and base tag
 # (CONTRACTS.md section 6, plan D2).
 if [ -f "$TEMPLATE_DIR/pins.json" ]; then
@@ -473,11 +492,13 @@ fi
 # --- sage install + probe: end ----------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Custom-node clone loop, from TWO sources merged in one place:
+# Custom-node clone loop, from three sources merged in one place:
 #   1. src/runtime_nodes.json in THIS repo - packs every template gets. One
 #      push plus a `stable` promotion puts a pack on all of them, instead of
 #      an identical one-line PR per template repo.
 #   2. template.json custom_nodes.repos - that template's own packs.
+#   3. template.json custom_nodes.profile_repos - packs for the selected,
+#      enabled swap profile only.
 # Entry syntax (CONTRACTS.md section 5): "<url>", "<url>|<sha>", "<url>|force".
 # Requirements installs run only when the checkout changed (fresh clone, or
 # HEAD moved), are backgrounded, and their PIDs collected and waited before
@@ -514,7 +535,8 @@ if isinstance(data, list):
 PY
 }
 
-# Runtime list first, then the template's. Deduplicated by the directory name
+# Runtime list first, then the template's unconditional and profile lists.
+# Deduplicated by the directory name
 # the loop derives below, because two entries naming one directory would clone
 # and then clone over the top. A name on both lists keeps the runtime's
 # position but the TEMPLATE's entry: the template is the more specific source
@@ -539,6 +561,9 @@ done < <(runtime_nodes_get)
 while IFS= read -r repo_entry; do
     [ -n "$repo_entry" ] && add_custom_node_entry "$repo_entry"
 done < <(template_json_get custom_nodes.repos)
+while IFS= read -r repo_entry; do
+    [ -n "$repo_entry" ] && add_custom_node_entry "$repo_entry"
+done < <(profile_custom_nodes_get)
 
 for entry in "${CUSTOM_NODE_REPOS[@]}"; do
     url="${entry%%|*}"

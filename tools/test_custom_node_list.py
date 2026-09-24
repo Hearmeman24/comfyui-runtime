@@ -76,7 +76,7 @@ def extract_func(name):
     return "\n".join(out)
 
 
-def run_loop(template_json: dict, runtime_nodes, existing=()):
+def run_loop(template_json: dict, runtime_nodes, existing=(), env_overrides=None):
     """Run the real loop. runtime_nodes=None writes NO runtime_nodes.json.
 
     `existing` names packs already checked out, so the pull path is exercised
@@ -92,6 +92,8 @@ def run_loop(template_json: dict, runtime_nodes, existing=()):
 
         runtime_dir = tmp / "runtime"
         (runtime_dir / "src").mkdir(parents=True)
+        (runtime_dir / "src" / "provisioner.py").write_bytes(
+            (REPO / "src" / "provisioner.py").read_bytes())
         if runtime_nodes is not None:
             payload = (runtime_nodes if isinstance(runtime_nodes, str)
                        else json.dumps(runtime_nodes))
@@ -112,6 +114,7 @@ def run_loop(template_json: dict, runtime_nodes, existing=()):
             "#!/usr/bin/env bash",
             "report_warn() { :; }",
             extract_func("template_json_get"),
+            extract_func("profile_custom_nodes_get"),
             extract_marked("custom-node clone loop"),
             'echo "RESOLVED_DIR=$CUSTOM_NODES_DIR"',
             "wait\n",
@@ -125,6 +128,7 @@ def run_loop(template_json: dict, runtime_nodes, existing=()):
             "PERSIST_ROOT": str(tmp / "vol"),
             "GIT_LOG": str(git_log),
         }
+        env.update(env_overrides or {})
         r = subprocess.run([BASH4, str(script)], env=env,
                            capture_output=True, text=True, timeout=120)
         ok(r.returncode == 0, f"loop exited {r.returncode}: {r.stderr[-400:]}")
@@ -142,6 +146,7 @@ B = "https://github.com/kijai/ComfyUI-KJNodes.git"
 C = "https://github.com/rgthree/rgthree-comfy.git"
 OPENROUTER_SIMPLE = "https://github.com/Hearmeman24/ComfyUI-OpenRouter-Simple.git"
 CIVITAI_PUBLISHER = "https://github.com/Hearmeman24/ComfyUI-CivitAI-Publisher.git"
+HYPERFLOW = "https://github.com/jalberty2018/ComfyUI-Hyperflow.git|90fac72fe147007c6fdfdeb10d5b9068f8eaf919"
 
 
 # --- tests ------------------------------------------------------------------
@@ -214,6 +219,27 @@ def test_volume_target_still_wins():
        f"and runtime packs land there too (got {clones})")
 
 
+def test_profile_repos_follow_active_swap_profile():
+    template = {"flags": {"download_minimax_h3": {"default": True}},
+                "swap_groups": [{"env": "minimax_quant", "default": "int8",
+                                 "flags": ["download_minimax_h3"],
+                                 "profiles": {"int8": {}, "bf16": {}, "false": {}}}],
+                "custom_nodes": {"target": "image", "repos": [B],
+                                 "profile_repos": {"minimax_quant": {
+                                     "bf16": [HYPERFLOW], "false": [HYPERFLOW]}}}}
+    for value, expected in (("int8", ["ComfyUI-KJNodes"]),
+                            ("bf16", ["ComfyUI-KJNodes", "ComfyUI-Hyperflow"]),
+                            ("BF16", ["ComfyUI-KJNodes", "ComfyUI-Hyperflow"]),
+                            ("false", ["ComfyUI-KJNodes", "ComfyUI-Hyperflow"]),
+                            ("typo", ["ComfyUI-KJNodes"])):
+        clones, _, _ = run_loop(template, None, env_overrides={"minimax_quant": value})
+        ok(clones == expected, f"profile {value} clones {expected}, got {clones}")
+    clones, _, _ = run_loop(template, None, env_overrides={
+        "minimax_quant": "bf16", "download_minimax_h3": "false"})
+    ok(clones == ["ComfyUI-KJNodes"],
+       f"disabled model group skips its profile node, got {clones}")
+
+
 def test_the_shipped_runtime_nodes_file_is_valid():
     p = REPO / "src" / "runtime_nodes.json"
     ok(p.exists(), "src/runtime_nodes.json is committed")
@@ -244,6 +270,7 @@ def main():
               test_existing_checkouts_pull_instead_of_cloning,
               test_a_broken_runtime_file_does_not_abort_the_boot,
               test_volume_target_still_wins,
+              test_profile_repos_follow_active_swap_profile,
               test_the_shipped_runtime_nodes_file_is_valid):
         t()
     failed = [label for good, label in CHECKS if not good]

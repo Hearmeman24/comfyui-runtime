@@ -321,7 +321,12 @@ pins, sage on/off").
       "https://github.com/kijai/ComfyUI-WanVideoWrapper.git",
       "https://github.com/kijai/ComfyUI-KJNodes.git|204f6d5",
       "https://github.com/spacepxl/ComfyUI-VAE-Utils.git|force"
-    ]
+    ],
+    "profile_repos": {                   // optional: only clone for selected, active swap profiles
+      "minimax_quant": {
+        "bf16": ["https://github.com/example/ComfyUI-Hyperflow.git|<sha>"]
+      }
+    }
   },
   "sage": true,                          // false skips the whole sage phase: no install, no probe
   "jupyter": true                        // optional, default TRUE; only false — in any case, the
@@ -407,6 +412,14 @@ Frozen semantics, generalised 1:1 from `comfyui-minimax/src/workflow_provisioner
 - Multiple groups may exist (qwen: one per model family, so enabling one flag never downloads
   another family's swapped files; each group carries its own env, matching qwen's per-flag
   `precision_env`, `provision_models.py:89`).
+
+`custom_nodes.profile_repos` keys must name an existing swap group's `env`; nested keys must name
+one of its profile keys, and values are lists of HTTPS clone entries with the same pin syntax as
+`custom_nodes.repos`. At boot the runtime resolves the profile with `resolve_profile_key` and adds
+these entries to the common clone loop only if that swap group's download flag is enabled. Unknown
+env values take the group's default for both models and nodes. Existing `custom_nodes.repos` remain
+unconditional. A checkout cloned on a previous boot is cached in its chosen target directory; this
+selection does not delete it if a pod later switches profiles.
 
 ### 5b. flags map
 
@@ -714,7 +727,8 @@ Boot order (donor citations against minimax/wan; architecture.md §3):
    `python3 /comfyui-runtime/src/sage_probe.py`, writing the probe's exit code and message to
    `/tmp/sage_verdict.rc` / `/tmp/sage_verdict.msg`. The subshell overlaps steps 8 through 14 and
    is joined in step 15, where exit 0 sets `SAGE_FLAG="--use-sage-attention"`.
-8. Custom-node clone loop from `template.json` (`custom_nodes.repos`, syntax §5), then their
+8. Custom-node clone loop from `template.json` (`custom_nodes.repos` plus selected
+   `custom_nodes.profile_repos`, syntax §5), then their
    requirements installs (backgrounded, PIDs collected and waited before launch, wan `:199-217,
    413-429`).
 9. `source $TEMPLATE_DIR/src/hooks/pre_download.sh` if present (§7).

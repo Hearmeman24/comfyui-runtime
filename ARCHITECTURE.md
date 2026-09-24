@@ -176,6 +176,11 @@ Both lists feed the same loop, deduplicated by directory name, and on a collisio
 entry wins. Keep the runtime list to packs with no dependencies: a `requirements.txt` there is a
 pip install on every boot of every pod.
 
+**`custom_nodes.profile_repos`** adds a template pack only for the selected profile of an active
+swap group. The runtime uses the provisioner's profile resolver, so node selection and model
+selection share the same fallback for unknown env values. It preserves the existing unconditional
+node lists and never deletes a checkout cached by an earlier profile.
+
 ---
 
 ## Adding a template

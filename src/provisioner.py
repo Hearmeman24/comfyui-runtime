@@ -100,7 +100,7 @@ def select(registry: dict, env, lightweight_fp8: bool) -> dict:
     }
 
 
-def resolve_profile_key(group: dict, env) -> str:
+def resolve_profile_key(group: dict, env, warn: bool = True) -> str:
     """Pick a swap group's profile from its env var. Unknown values warn and
     fall back to the default: a customer typo must not kill a boot
     (qwen resolve_precision, provision_models.py:65-70)."""
@@ -113,9 +113,31 @@ def resolve_profile_key(group: dict, env) -> str:
     lowered = raw.strip().lower()
     if lowered in profiles:
         return lowered
-    print(f"[provisioner] warning: unknown {group['env']}={raw!r}; "
-          f"using default {group['default']!r}")
+    if warn:
+        print(f"[provisioner] warning: unknown {group['env']}={raw!r}; "
+              f"using default {group['default']!r}")
     return group["default"]
+
+
+def select_custom_node_repos(template: dict, env) -> list[str]:
+    """Template node packs selected by active swap-group profiles.
+
+    The profile is resolved by the same function as model provisioning, so an
+    unknown env value falls back to the default for both models and nodes.
+    """
+    configured = template.get("custom_nodes", {}).get("profile_repos", {})
+    flags = template.get("flags", {})
+    selected = []
+    for group in template.get("swap_groups", []):
+        by_profile = configured.get(group["env"], {})
+        if not by_profile:
+            continue
+        if not any(flag_enabled(env, name, bool(flags.get(name, {}).get("default")))
+                   for name in group.get("flags", [])):
+            continue
+        profile = resolve_profile_key(group, env, warn=False)
+        selected.extend(by_profile.get(profile, []))
+    return selected
 
 
 def build_swap_state(template: dict, env, enabled: set,

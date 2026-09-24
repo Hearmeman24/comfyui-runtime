@@ -502,6 +502,25 @@ def test_template_schema_rejects_unknown_swap_group_and_profile_shape():
           "E16: an unknown key inside custom_nodes errors")
 
 
+def test_profile_custom_nodes_schema():
+    t = valid_template("walk")
+    t["custom_nodes"]["profile_repos"] = {
+        "minimax_quant": {"fp8": ["https://github.com/x/node.git|abc"]}}
+    check(vm.check_template_schema(t) == [],
+          "profile node repos accept an existing swap profile and HTTPS repo")
+    t["custom_nodes"]["profile_repos"]["minimax_quant"]["other"] = ["https://x/y"]
+    check(any("unknown profile 'other'" in e for e in vm.check_template_schema(t)),
+          "unknown profile node selector fails validation")
+    t["custom_nodes"]["profile_repos"] = {"typo": {"fp8": ["https://x/y"]}}
+    check(any("unknown swap group 'typo'" in e for e in vm.check_template_schema(t)),
+          "unknown profile node swap group fails validation")
+    t["custom_nodes"]["profile_repos"] = {
+        "minimax_quant": {"fp8": ["http://x/y"]}}
+    check(any("must be a list of HTTPS repos" in e
+              for e in vm.check_template_schema(t)),
+          "non-HTTPS profile node URL fails validation")
+
+
 def test_template_schema_runs_in_the_gate():
     """The allowlist must fire through run(), not just as a library call:
     that is the only path CI takes."""
@@ -804,6 +823,7 @@ def main() -> int:
         test_template_schema_rejects_unknown_top_level_key,
         test_template_schema_rejects_unknown_flag_key,
         test_template_schema_rejects_unknown_swap_group_and_profile_shape,
+        test_profile_custom_nodes_schema,
         test_template_schema_runs_in_the_gate,
         test_presigned_url_is_redacted_in_errors,
         test_allowlists_suppress_warnings,

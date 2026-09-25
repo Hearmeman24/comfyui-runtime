@@ -492,12 +492,13 @@ fi
 # --- sage install + probe: end ----------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Custom-node clone loop, from three sources merged in one place:
+# Custom-node clone loop, from four sources merged in one place:
 #   1. src/runtime_nodes.json in THIS repo - packs every template gets. One
 #      push plus a `stable` promotion puts a pack on all of them, instead of
 #      an identical one-line PR per template repo.
 #   2. template.json custom_nodes.repos - that template's own packs.
-#   3. template.json custom_nodes.profile_repos - packs for the selected,
+#   3. template.json custom_nodes.flag_repos - packs for enabled flags only.
+#   4. template.json custom_nodes.profile_repos - packs for the selected,
 #      enabled swap profile only.
 # Entry syntax (CONTRACTS.md section 5): "<url>", "<url>|<sha>", "<url>|force".
 # Requirements installs run only when the checkout changed (fresh clone, or
@@ -535,7 +536,7 @@ if isinstance(data, list):
 PY
 }
 
-# Runtime list first, then the template's unconditional and profile lists.
+# Runtime list first, then template unconditional, flag, and profile lists.
 # Deduplicated by the directory name
 # the loop derives below, because two entries naming one directory would clone
 # and then clone over the top. A name on both lists keeps the runtime's

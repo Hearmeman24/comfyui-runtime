@@ -322,6 +322,9 @@ pins, sage on/off").
       "https://github.com/kijai/ComfyUI-KJNodes.git|204f6d5",
       "https://github.com/spacepxl/ComfyUI-VAE-Utils.git|force"
     ],
+    "flag_repos": {                      // optional: only clone when a declared flag is enabled
+      "download_optional": ["https://github.com/example/ComfyUI-Optional.git|<sha>"]
+    },
     "profile_repos": {                   // optional: only clone for selected, active swap profiles
       "minimax_quant": {
         "bf16": ["https://github.com/example/ComfyUI-Hyperflow.git|<sha>"]
@@ -412,6 +415,15 @@ Frozen semantics, generalised 1:1 from `comfyui-minimax/src/workflow_provisioner
 - Multiple groups may exist (qwen: one per model family, so enabling one flag never downloads
   another family's swapped files; each group carries its own env, matching qwen's per-flag
   `precision_env`, `provision_models.py:89`).
+
+`custom_nodes.flag_repos` keys must name an existing `flags` entry; values are lists of HTTPS clone
+entries using the same pin syntax as `custom_nodes.repos`. Selection uses that flag's `default`
+and the same truth rules as model provisioning (§3). Missing configuration selects no extra packs.
+The clone list merges runtime packs, unconditional template packs, enabled flag packs, then selected
+profile packs; the last entry for a directory supplies its URL/pin, with no duplicate install.
+Disabling a flag stops selecting its packs but does not remove previously installed checkouts.
+A dependency-only flag can use empty `folders` and `extra_models` to provision weights without
+shipping workflow JSON.
 
 `custom_nodes.profile_repos` keys must name an existing swap group's `env`; nested keys must name
 one of its profile keys, and values are lists of HTTPS clone entries with the same pin syntax as

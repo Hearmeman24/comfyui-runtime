@@ -120,14 +120,20 @@ def resolve_profile_key(group: dict, env, warn: bool = True) -> str:
 
 
 def select_custom_node_repos(template: dict, env) -> list[str]:
-    """Template node packs selected by active swap-group profiles.
+    """Template node packs selected by flags, then active swap-group profiles.
 
-    The profile is resolved by the same function as model provisioning, so an
-    unknown env value falls back to the default for both models and nodes.
+    Flag defaults and truthiness match model provisioning. The profile is
+    resolved by the same function too, so unknown values use its default.
+    Profile entries come last to preserve their more-specific overrides in
+    the boot loop's directory-name deduplication.
     """
-    configured = template.get("custom_nodes", {}).get("profile_repos", {})
+    nodes = template.get("custom_nodes", {})
+    configured = nodes.get("profile_repos", {})
     flags = template.get("flags", {})
     selected = []
+    for name, repos in nodes.get("flag_repos", {}).items():
+        if flag_enabled(env, name, bool(flags.get(name, {}).get("default"))):
+            selected.extend(repos)
     for group in template.get("swap_groups", []):
         by_profile = configured.get(group["env"], {})
         if not by_profile:

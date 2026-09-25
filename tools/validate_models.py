@@ -136,7 +136,7 @@ FLAG_KEYS = frozenset({"folders", "workflows", "copy", "default", "extra_models"
 # (CONTRACTS.md section 5a)
 SWAP_GROUP_KEYS = frozenset({"env", "default", "flags", "profiles"})
 # custom_nodes: start.sh :425,:437.
-CUSTOM_NODES_KEYS = frozenset({"target", "repos", "profile_repos"})
+CUSTOM_NODES_KEYS = frozenset({"target", "repos", "flag_repos", "profile_repos"})
 
 # https://huggingface.co/<owner>/<repo>/resolve/<rev>/<path/in/repo>
 HF_RESOLVE_RE = re.compile(
@@ -437,6 +437,21 @@ def check_template_schema(template: dict) -> list[str]:
         errors.append("template.json: 'custom_nodes' must be an object")
     elif isinstance(nodes, dict):
         errors += _unknown_keys("custom_nodes", nodes, CUSTOM_NODES_KEYS)
+
+        flag_repos = nodes.get("flag_repos", {})
+        if not isinstance(flag_repos, dict):
+            errors.append("template.json: custom_nodes.flag_repos must be an object")
+        else:
+            known_flags = flags if isinstance(flags, dict) else {}
+            for name, repos in flag_repos.items():
+                if name not in known_flags:
+                    errors.append(f"template.json: custom_nodes.flag_repos: "
+                                  f"unknown flag {name!r}")
+                if not isinstance(repos, list) or not all(
+                        isinstance(repo, str) and repo.startswith("https://")
+                        for repo in repos):
+                    errors.append(f"template.json: custom_nodes.flag_repos "
+                                  f"for {name!r} must be a list of HTTPS repos")
 
         profile_repos = nodes.get("profile_repos", {})
         if not isinstance(profile_repos, dict):

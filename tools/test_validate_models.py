@@ -521,6 +521,31 @@ def test_profile_custom_nodes_schema():
           "non-HTTPS profile node URL fails validation")
 
 
+def test_flag_custom_nodes_schema():
+    t = valid_template("walk")
+    t["custom_nodes"]["flag_repos"] = {
+        "download_wan21": ["https://github.com/x/node.git|abc"],
+        "DOWNLOAD_QWEN_IMAGE": []}
+    check(vm.check_template_schema(t) == [],
+          "flag node repos accept existing flags, pins, and an empty repo list")
+    for value in (None, [], "https://x/y"):
+        t["custom_nodes"]["flag_repos"] = value
+        check(any("custom_nodes.flag_repos must be an object" in e
+                  for e in vm.check_template_schema(t)),
+              f"flag node mapping rejects {value!r}")
+    t["custom_nodes"]["flag_repos"] = {"typo": ["https://x/y"]}
+    check(any("unknown flag 'typo'" in e for e in vm.check_template_schema(t)),
+          "flag node selector must name a declared flag")
+    for value in (None, "https://x/y", [12], [None], ["http://x/y"], [""]):
+        t["custom_nodes"]["flag_repos"] = {"download_wan21": value}
+        check(any("must be a list of HTTPS repos" in e
+                  for e in vm.check_template_schema(t)),
+              f"flag node URL list rejects {value!r}")
+    t["flags"] = []
+    check(any("'flags' must be an object" in e for e in vm.check_template_schema(t)),
+          "malformed flags is reported without crashing flag node validation")
+
+
 def test_template_schema_runs_in_the_gate():
     """The allowlist must fire through run(), not just as a library call:
     that is the only path CI takes."""
@@ -824,6 +849,7 @@ def main() -> int:
         test_template_schema_rejects_unknown_flag_key,
         test_template_schema_rejects_unknown_swap_group_and_profile_shape,
         test_profile_custom_nodes_schema,
+        test_flag_custom_nodes_schema,
         test_template_schema_runs_in_the_gate,
         test_presigned_url_is_redacted_in_errors,
         test_allowlists_suppress_warnings,

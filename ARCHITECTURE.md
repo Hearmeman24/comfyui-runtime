@@ -176,6 +176,11 @@ Both lists feed the same loop, deduplicated by directory name, and on a collisio
 entry wins. Keep the runtime list to packs with no dependencies: a `requirements.txt` there is a
 pip install on every boot of every pod.
 
+Optional packs use **`custom_nodes.flag_repos`**, keyed by a declared download flag, so the same
+flag can select `extra_models` and node requirements without distributing a workflow. Flag packs
+join after unconditional template packs and before `profile_repos`; the last entry for a directory
+wins. Turning a flag off stops provisioning its dependencies but preserves previously cached files.
+
 **`custom_nodes.profile_repos`** adds a template pack only for the selected profile of an active
 swap group. The runtime uses the provisioner's profile resolver, so node selection and model
 selection share the same fallback for unknown env values. It preserves the existing unconditional

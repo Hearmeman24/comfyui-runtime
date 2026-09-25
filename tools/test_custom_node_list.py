@@ -76,7 +76,8 @@ def extract_func(name):
     return "\n".join(out)
 
 
-def run_loop(template_json: dict, runtime_nodes, existing=(), env_overrides=None):
+def run_loop(template_json: dict, runtime_nodes, existing=(), env_overrides=None,
+             observations=None):
     """Run the real loop. runtime_nodes=None writes NO runtime_nodes.json.
 
     `existing` names packs already checked out, so the pull path is exercised
@@ -138,6 +139,10 @@ def run_loop(template_json: dict, runtime_nodes, existing=(), env_overrides=None
         # so the directory is field 1.
         pulls = [l.split()[1].rsplit("/", 1)[-1] for l in raw
                  if l.startswith("-C ") and " pull" in l]
+        if observations is not None:
+            observations["git"] = raw
+            observations["retained"] = [name for name in existing
+                                        if (nodes_dir / name / ".git").is_dir()]
         return clones, pulls, r.stdout
 
 
@@ -240,6 +245,63 @@ def test_profile_repos_follow_active_swap_profile():
        f"disabled model group skips its profile node, got {clones}")
 
 
+def flag_template():
+    return {"flags": {"premium": {"default": False},
+                      "other": {}, "base": {"default": True}},
+            "custom_nodes": {"target": "image", "repos": [],
+                             "flag_repos": {"premium": [B], "other": [C],
+                                            "base": [A]}}}
+
+
+def test_flag_repos_follow_flag_truthiness_and_defaults():
+    for value, enabled in ((None, False), ("", False), ("false", False),
+                           ("typo", False), ("true", True), (" TRUE ", True),
+                           ("1", True), ("yes", True), ("on", True)):
+        env = {} if value is None else {"premium": value}
+        clones, _, _ = run_loop(flag_template(), None, env_overrides=env)
+        expected = (["ComfyUI-KJNodes"] if enabled else []) + ["ComfyUI-HearmemanAI-Upscale"]
+        ok(clones == expected, f"opt-in flag {value!r}: expected {expected}, got {clones}")
+    clones, _, _ = run_loop(flag_template(), None, env_overrides={
+        "premium": "false", "other": "true", "base": "false"})
+    ok(clones == ["rgthree-comfy"], f"flags select independently, got {clones}")
+    clones, _, _ = run_loop(flag_template(), None, env_overrides={"base": "typo"})
+    ok(clones == ["ComfyUI-HearmemanAI-Upscale"],
+       f"default-on flag retains opt-out semantics for typos, got {clones}")
+
+
+def test_flag_repos_share_merge_and_pin_precedence():
+    template = flag_template()
+    template["custom_nodes"]["repos"] = [B + "|unconditional"]
+    template["custom_nodes"]["flag_repos"]["premium"] = [B + "|flagpin", B + "|flagpin"]
+    observed = {}
+    clones, _, _ = run_loop(template, [B], env_overrides={"premium": "true"},
+                            observations=observed)
+    resets = [event.rsplit(" ", 1)[-1] for event in observed["git"] if " reset --hard " in event]
+    ok(clones.count("ComfyUI-KJNodes") == 1,
+       f"runtime, unconditional, and repeated flag entries clone once: {clones}")
+    ok(resets == ["flagpin"], f"active flag entry overrides unconditional/runtime pin: {resets}")
+    template["swap_groups"] = [{"env": "precision", "default": "fp8", "flags": ["premium"],
+                                "profiles": {"fp8": {}}}]
+    template["custom_nodes"]["profile_repos"] = {"precision": {"fp8": [B + "|profilepin"]}}
+    run_loop(template, [B], env_overrides={"premium": "true"}, observations=observed)
+    resets = [event.rsplit(" ", 1)[-1] for event in observed["git"] if " reset --hard " in event]
+    ok(resets == ["profilepin"], f"profile entry remains most specific: {resets}")
+
+
+def test_flag_repos_preserve_existing_checkouts():
+    template = flag_template()
+    observed = {}
+    clones, pulls, _ = run_loop(template, None, existing=["ComfyUI-KJNodes"],
+                                env_overrides={"premium": "true"}, observations=observed)
+    ok("ComfyUI-KJNodes" not in clones and "ComfyUI-KJNodes" in pulls,
+       "enabled flag updates its existing checkout instead of cloning")
+    clones, pulls, _ = run_loop(template, None, existing=["ComfyUI-KJNodes"],
+                                env_overrides={"premium": "false"}, observations=observed)
+    ok("ComfyUI-KJNodes" not in clones + pulls and
+       observed["retained"] == ["ComfyUI-KJNodes"],
+       "disabling the flag leaves its cached checkout untouched")
+
+
 def test_the_shipped_runtime_nodes_file_is_valid():
     p = REPO / "src" / "runtime_nodes.json"
     ok(p.exists(), "src/runtime_nodes.json is committed")
@@ -271,6 +333,9 @@ def main():
               test_a_broken_runtime_file_does_not_abort_the_boot,
               test_volume_target_still_wins,
               test_profile_repos_follow_active_swap_profile,
+              test_flag_repos_follow_flag_truthiness_and_defaults,
+              test_flag_repos_share_merge_and_pin_precedence,
+              test_flag_repos_preserve_existing_checkouts,
               test_the_shipped_runtime_nodes_file_is_valid):
         t()
     failed = [label for good, label in CHECKS if not good]

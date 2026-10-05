@@ -25,7 +25,7 @@ REPO = Path(__file__).resolve().parents[1]
 VENDOR = REPO / "vendor" / "civitai_downloader"
 SOURCE = VENDOR / "download_with_aria.py"
 EXPECTED_SOURCE_SHA256 = (
-    "c48a41b4095f6d93dda58063ed6426a8ae00e297cb7bbebb64ae0d7cdf8dc1d6"
+    "8d6fe4539bc5faa13b8e82165382716e7cc1b27a6f059fd768cbea499c0d5e4b"
 )
 EXPECTED_REQUIREMENTS_SHA256 = (
     "0d0d2938e5443f318fc97363f42cffe3309df1b718cc2bf713263a68cb7bbee5"
@@ -128,7 +128,7 @@ class ProvenanceTests(unittest.TestCase):
             f"{EXPECTED_REQUIREMENTS_SHA256}  {requirements.name}", checksums
         )
         provenance = (VENDOR / "UPSTREAM.md").read_text(encoding="utf-8")
-        self.assertIn("fcba2f29e23f424984bba3f2654c59b9370ee905", provenance)
+        self.assertIn("8dda3f361446f4ac3dbbc365332eeeeeea5606c2", provenance)
         self.assertEqual(
             requirements.read_text(encoding="utf-8").strip(),
             "requests==2.34.2",

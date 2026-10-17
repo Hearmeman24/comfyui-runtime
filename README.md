@@ -41,6 +41,25 @@ behind them. Read it before changing anything.
 | `torch/cu128.txt` `torch/cu130.txt` | The family torch pins |
 | `base/Dockerfile` | The shared base image, two CUDA variants |
 
+## Approved ComfyUI base
+
+The base now pins the latest stable ComfyUI release v0.41.0 to commit
+`98cc0bf84b7cb1383654c5b402e7612d875d6d22`. It includes native FLUX.3 Klein support;
+the build checks for its model implementation as well as Qwen Image 2.1 support.
+Torch and SageAttention pins are unchanged.
+
+Release this base before merging the dependent Qwen-template Klein 3 PR:
+
+1. Merge the runtime PR and create the next `vN` release tag through the existing release process.
+2. Wait for CircleCI to publish both immutable base images:
+   `hearmeman/comfyui-base:cu128-comfy0.41.0-98cc0bf8-torch2.11.0` and
+   `hearmeman/comfyui-base:cu130-comfy0.41.0-98cc0bf8-torch2.11.0`.
+3. Merge the Qwen-template PR that updates its Dockerfile and `pins.json` to the new cu130 base,
+   then release a new Qwen image. Existing pods keep their image's approved core until redeployed.
+
+Moving `stable` alone does not upgrade an image's baked ComfyUI checkout. Other template images
+can adopt the new base separately; their current immutable base tags remain available for rollback.
+
 ## License
 
 AGPL-3.0, inherited from ComfyUI. See `LICENSE`.

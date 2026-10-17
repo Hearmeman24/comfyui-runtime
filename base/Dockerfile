@@ -18,7 +18,7 @@
 # is COPYed in), so always build with `-f base/Dockerfile` from the repo root.
 #
 # Tag grammar (plan.md 5c): hearmeman/comfyui-base:<cuNNN>-comfy<ref>-torch<ver>
-# e.g. cu130-comfy0.36.0-3dd559d8-torch2.11.0. A torch or ComfyUI bump means a new tag;
+# e.g. cu130-comfy0.41.0-98cc0bf8-torch2.11.0. A torch or ComfyUI bump means a new tag;
 # old tags are immutable rollbacks.
 #
 # A CUDA_VARIANT / CUDA_BASE_IMAGE mismatch is caught by the sage assertion
@@ -34,10 +34,10 @@ ARG CUDA_VARIANT
 # ComfyUI pin. Prefer an immutable 40-character commit SHA; tags also resolve.
 # The base tag carries a readable label, and COMFYUI_VERSION=approved restores to it
 # at boot via /comfyui-approved-ref (plan.md 5b).
-# v0.36.0 predates native Qwen Image 2.1 support. This immutable post-release
-# upstream commit contains CORE-423 / PR #16400 and is the approved family pin.
-ARG COMFYUI_REF=3dd559d81f745747cab884a3b9f5fd8867d79efe
-ARG COMFYUI_IMAGE_REF=0.36.0-3dd559d8
+# Latest stable release v0.41.0 (2026-10-17), resolved to an immutable SHA.
+# Includes native FLUX.3 Klein support and retains Qwen Image 2.1 support.
+ARG COMFYUI_REF=98cc0bf84b7cb1383654c5b402e7612d875d6d22
+ARG COMFYUI_IMAGE_REF=0.41.0-98cc0bf8
 
 # Consolidated environment variables (comfyui-wan/Dockerfile:22-26, byte-similar
 # in all four templates).
@@ -132,6 +132,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && test "$(git -C /ComfyUI rev-parse HEAD)" = "${COMFYUI_REF}" \
     && test -f /ComfyUI/comfy/ldm/qwen_image21/model.py \
     && test -f /ComfyUI/comfy/text_encoders/qwen_image21.py \
+    && test -f /ComfyUI/comfy/ldm/flux3/model.py \
     && git -C /ComfyUI config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' \
     && git -C /ComfyUI config --add remote.origin.fetch '+refs/tags/*:refs/tags/*' \
     && git -C /ComfyUI rev-parse HEAD > /comfyui-approved-ref \

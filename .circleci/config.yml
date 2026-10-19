@@ -1,9 +1,11 @@
 # .circleci/config.yml (CircleCI 2.1) for comfyui-runtime
 #
-# Two jobs:
+# Jobs:
 #   verify     - every push, cheap, no contexts (doubles as the project connection test)
+#   test_build_base - non-main branches, builds cu130 from versions.json, no push
 #   build_base - git tag only, builds and pushes BOTH base variants
 #                (hearmeman/comfyui-base:cu128-comfy<ref>-torch<ver> and cu130-...)
+#   fanout_templates - after build_base: one template PR each, held ones skipped
 #
 # Family rules honored (comfy/CLAUDE.md section 7):
 #   - builds fire on a vN tag only
@@ -53,74 +55,52 @@ commands:
 
   build-base-variant:
     description: >
-      Build and push one base variant. The four per-variant --build-arg
-      overrides of the old template configs (comfyui-wan/.circleci/config.yml:90-93)
-      collapse to the variant's own base args: CUDA_VARIANT picks the
-      torch/cu<NNN>.txt trio inside base/Dockerfile, CUDA_BASE_IMAGE picks the
-      CUDA devel base. The torch trio itself is never spelled here; the
-      Dockerfile reads it from torch/<variant>.txt (plan D10), and this command
-      reads the same file only to compose the tag. The variant-matched sage
-      import assertion runs INSIDE the image build (plan section 5c), not as a
-      CI step.
+      Build one base variant from versions.json (the single source of truth):
+      tools/versions.py derives the image tag and every --build-arg
+      (CUDA_VARIANT, CUDA_BASE_IMAGE, COMFYUI_REF, COMFYUI_IMAGE_REF), so this
+      file never spells a version. push=false is the PR test build: same
+      build, nothing leaves the machine. The variant-matched sage import
+      assertion runs INSIDE the image build (plan section 5c).
     parameters:
       variant:
         type: string # cu128 | cu130
-      cuda_base_image:
-        type: string
+      push:
+        type: boolean
+        default: true
     steps:
       - run:
-          name: Build & push base << parameters.variant >> (DLC + registry cache)
+          name: Build base << parameters.variant >> from versions.json (DLC + registry cache)
           command: |
             VARIANT="<< parameters.variant >>"
-            IMG="docker.io/$DOCKERHUB_USER/comfyui-base"
+            IMG="docker.io/hearmeman/comfyui-base"
+            TAG=$(python3 tools/versions.py tag "$VARIANT")
+            mapfile -t BUILD_ARGS < <(python3 tools/versions.py build-args "$VARIANT")
+            echo "Building ${IMG}:${TAG} with ${BUILD_ARGS[*]}"
 
-            # Tag grammar (CONTRACTS.md section 6, plan section 5c "Tagging"):
-            #   <cuNNN>-comfy<label>-torch<ver>, e.g. cu130-comfy0.42.1-63be2f9b-torch2.11.0
-            # COMFYUI_IMAGE_REF is the human-readable immutable image label;
-            # COMFYUI_REF separately owns the exact upstream checkout. Torch
-            # version comes from the canonical trio file. Fail loudly if either is unreadable rather
-            # than pushing a malformed tag.
-            COMFY_REF=$(grep -m1 -E '^ARG COMFYUI_IMAGE_REF=' base/Dockerfile | cut -d= -f2- | tr -d '"' | tr -d "'")
-            if [ -z "$COMFY_REF" ]; then
-              echo "FATAL: could not read ARG COMFYUI_IMAGE_REF=<ref> from base/Dockerfile"
-              exit 1
-            fi
-            TORCH_VER=$(grep -m1 -E '^torch==' "torch/${VARIANT}.txt" | sed 's/^torch==//')
-            if [ -z "$TORCH_VER" ]; then
-              echo "FATAL: could not read torch pin from torch/${VARIANT}.txt"
-              exit 1
-            fi
-            # Strip a leading "v" for compatibility with release-tag labels.
-            COMFY_REF_TAG="${COMFY_REF#v}"
-            TAG="${VARIANT}-comfy${COMFY_REF_TAG}-torch${TORCH_VER}"
-            echo "Building ${IMG}:${TAG}"
-
-            # Dedicated cache tag PER VARIANT so the two builds never thrash
-            # each other's layer cache, and so :latest is never implicitly
-            # touched (family rule, comfy/CLAUDE.md section 7).
+            # Dedicated cache tag PER VARIANT; :latest is never touched.
             CACHE_TAG="buildcache-${VARIANT}"
             docker pull "${IMG}:${CACHE_TAG}" || true
 
-            # BUILDKIT_INLINE_CACHE=1 embeds layer metadata in the output
-            # image so future --cache-from runs can read it. Build context is
-            # the repo root: base/Dockerfile COPYs torch/<variant>.txt and the
-            # sage wheels from it.
             docker build \
               --progress=plain \
               --cache-from "${IMG}:${CACHE_TAG}" \
               --build-arg BUILDKIT_INLINE_CACHE=1 \
-              --build-arg CUDA_VARIANT="${VARIANT}" \
-              --build-arg CUDA_BASE_IMAGE="<< parameters.cuda_base_image >>" \
+              "${BUILD_ARGS[@]}" \
               -f base/Dockerfile \
               -t "${IMG}:${TAG}" .
-
-            docker push "${IMG}:${TAG}"
-
-            docker tag "${IMG}:${TAG}" "${IMG}:${CACHE_TAG}"
-            docker push "${IMG}:${CACHE_TAG}"
-
-            # Per-variant success marker for the final notify step.
-            touch "/tmp/build_success_${VARIANT}"
+      - when:
+          condition: << parameters.push >>
+          steps:
+            - run:
+                name: Push base << parameters.variant >>
+                command: |
+                  VARIANT="<< parameters.variant >>"
+                  IMG="docker.io/hearmeman/comfyui-base"
+                  TAG=$(python3 tools/versions.py tag "$VARIANT")
+                  docker push "${IMG}:${TAG}"
+                  docker tag "${IMG}:${TAG}" "${IMG}:buildcache-${VARIANT}"
+                  docker push "${IMG}:buildcache-${VARIANT}"
+                  touch "/tmp/build_success_${VARIANT}"
 
 jobs:
   # Runs on EVERY push (and on tags, as the gate before build_base). Needs no
@@ -143,6 +123,9 @@ jobs:
           name: shellcheck (severity=error)
           command: |
             find src tools -name '*.sh' -print0 | xargs -0 -r shellcheck --severity=error
+      - run:
+          name: versions.json coherent with base/Dockerfile and torch/
+          command: python3 tools/versions.py check
       - run:
           name: Python byte-compile
           command: |
@@ -207,10 +190,8 @@ jobs:
           message: "A comfyui-base build (both CUDA variants) has started for tag ${CIRCLE_TAG}."
       - build-base-variant:
           variant: cu128
-          cuda_base_image: nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
       - build-base-variant:
           variant: cu130
-          cuda_base_image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04
       - run:
           name: Notify FlowBot - build complete
           when: always
@@ -233,6 +214,41 @@ jobs:
               -H "Authorization: Bearer ${FLOWBOT_WEBHOOK_TOKEN}" \
               -H "Content-Type: application/json" \
               -d "{\"message\": \"${MSG}\", \"source\": \"circleci\"}"
+
+  # PR test build: builds the template variant (cu130) exactly as build_base
+  # would, never logs in, never pushes. Halts early, for free, on branches
+  # whose diff against main does not touch what goes into the base image.
+  test_build_base:
+    executor: docker-dind
+    steps:
+      - checkout
+      - run:
+          name: Skip unless the base inputs changed
+          command: |
+            git fetch -q origin main
+            if git diff --quiet origin/main...HEAD -- base torch versions.json tools/versions.py .circleci/config.yml; then
+              echo "No base inputs changed vs main; skipping the test build."
+              circleci-agent step halt
+            fi
+      - build-base-variant:
+          variant: cu130
+          push: false
+
+  # After build_base pushed both variants: one PR per template, skipping
+  # templates whose pins.json carries a "hold" (tools/fanout_templates.py).
+  fanout_templates:
+    executor: python
+    steps:
+      - checkout
+      - run:
+          name: Open template bump PRs (held templates skipped and reported)
+          command: |
+            if [ -z "${TEMPLATE_FANOUT_GITHUB_TOKEN:-}" ]; then
+              echo "TEMPLATE_FANOUT_GITHUB_TOKEN not set (context template-fanout); dry run only."
+              python3 tools/fanout_templates.py --dry-run
+              exit 0
+            fi
+            GITHUB_TOKEN="$TEMPLATE_FANOUT_GITHUB_TOKEN" python3 tools/fanout_templates.py
 
   # Weekly URL-rot canary. Finding from 2026-08-12: two nvidia/PiD registry
   # URLs 404 on master in the template family while model-validator reports
@@ -290,6 +306,12 @@ workflows:
           filters:
             tags:
               only: /.*/
+      - test_build_base:
+          requires:
+            - verify
+          filters:
+            branches:
+              ignore: main
       - build_base:
           requires:
             - verify
@@ -299,6 +321,16 @@ workflows:
           filters:
             tags:
               only: /^v[0-9]+(\.[0-9]+)*$/ # tags like v5 or v1.2.3, family convention
+            branches:
+              ignore: /.*/
+      - fanout_templates:
+          requires:
+            - build_base
+          context:
+            - template-fanout
+          filters:
+            tags:
+              only: /^v[0-9]+(\.[0-9]+)*$/
             branches:
               ignore: /.*/
 

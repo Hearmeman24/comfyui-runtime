@@ -40,6 +40,9 @@ behind them. Read it before changing anything.
 | `tools/test_*.py` | Stdlib self-test suites, run by CI `verify` |
 | `torch/cu128.txt` `torch/cu130.txt` | The family torch pins |
 | `base/Dockerfile` | The shared base image, two CUDA variants |
+| `versions.json` + `tools/versions.py` | Single source of truth for the ComfyUI pin, torch, CUDA variants and the template list |
+| `tools/comfyui_release_watch.py` + `.github/workflows/comfyui-release-watch.yml` | Daily check that opens the runtime bump PR |
+| `tools/fanout_templates.py` | Opens one template PR per new base, skipping held templates |
 
 ## Approved ComfyUI base
 
@@ -60,6 +63,49 @@ Release this base before merging the dependent template PRs:
 
 Moving `stable` alone does not upgrade an image's baked ComfyUI checkout. Previous immutable base
 tags (`comfy0.41.0-98cc0bf8`, `comfy0.36.0-3dd559d8`) remain available for rollback.
+
+## Upgrade flow
+
+1. **Watch.** `ComfyUI release watch` (GitHub Actions, daily 08:17 Israel time, or run it manually)
+   compares the latest stable ComfyUI release with `versions.json`. If upstream is newer, it rewrites
+   `versions.json` and the `base/Dockerfile` ARG defaults (`tools/versions.py set-release`) and
+   opens `auto/comfyui-<label>` against `main`.
+2. **Test build.** On any non-`main` branch that changes base inputs (`base/`, `torch/`,
+   `versions.json`, `tools/versions.py`, CircleCI config), `test_build_base` builds cu130 exactly as
+   a release would, with no login and no push. `verify` runs `tools/versions.py check`, so a
+   Dockerfile default or torch pin that drifts from `versions.json` fails the PR.
+3. **Release.** Merge, then push the next `vN` tag. `build_base` derives every tag and build arg from
+   `versions.json` and pushes both variants.
+4. **Fan-out.** `fanout_templates` then opens `auto/comfyui-<label>` in every template listed in
+   `versions.json` that is behind and not held, moving `pins.json` `base_image` and the Dockerfile
+   `ARG BASE_IMAGE`. Held templates are skipped and named in the job log. It never merges, tags or
+   touches RunPod; each template still ships through its own `vN` tag.
+
+To bump by hand: `python3 tools/versions.py set-release v0.43.0 <40-char sha>`.
+
+### Holding a template back
+
+A template stays on its current base image and `runtime_ref` while the others move on when its
+`pins.json` has a `hold` with a reason:
+
+```json
+{
+  "runtime_ref": "v4",
+  "base_image": "hearmeman/comfyui-base:cu130-comfy0.42.1-63be2f9b-torch2.11.0",
+  "hold": {"reason": "AI-Toolkit breaks on ComfyUI v0.43.0", "since": "2026-10-20"}
+}
+```
+
+The override lives in the template's own `pins.json`, not in a central matrix, because that file
+already owns the template's `base_image` and `runtime_ref`. The hold sits next to the values it
+freezes, it is reviewed in that template's history, and no second list can drift from it. Pinning
+`runtime_ref` to a tag in the same file keeps a held template off `stable` promotions. Delete `hold`
+to rejoin the next fan-out (re-run it with `tools/fanout_templates.py`, or wait for the next base).
+`tools/fanout_templates.py --dry-run` prints the plan without writing anything.
+
+Setup the fan-out needs: a CircleCI context `template-fanout` holding `TEMPLATE_FANOUT_GITHUB_TOKEN`,
+a fine-grained token with Contents and Pull requests write on the four template repos. Without it
+the job prints a dry run and passes.
 
 ## License
 

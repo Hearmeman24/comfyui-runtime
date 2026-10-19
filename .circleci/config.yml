@@ -75,7 +75,7 @@ commands:
             IMG="docker.io/$DOCKERHUB_USER/comfyui-base"
 
             # Tag grammar (CONTRACTS.md section 6, plan section 5c "Tagging"):
-            #   <cuNNN>-comfy<label>-torch<ver>, e.g. cu130-comfy0.41.0-98cc0bf8-torch2.11.0
+            #   <cuNNN>-comfy<label>-torch<ver>, e.g. cu130-comfy0.42.1-63be2f9b-torch2.11.0
             # COMFYUI_IMAGE_REF is the human-readable immutable image label;
             # COMFYUI_REF separately owns the exact upstream checkout. Torch
             # version comes from the canonical trio file. Fail loudly if either is unreadable rather

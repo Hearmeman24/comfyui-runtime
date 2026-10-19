@@ -43,22 +43,23 @@ behind them. Read it before changing anything.
 
 ## Approved ComfyUI base
 
-The base now pins the latest stable ComfyUI release v0.41.0 to commit
-`98cc0bf84b7cb1383654c5b402e7612d875d6d22`. It includes native FLUX.3 Klein support;
-the build checks for its model implementation as well as Qwen Image 2.1 support.
-Torch and SageAttention pins are unchanged.
+The base pins the latest stable ComfyUI release v0.42.1 to commit
+`63be2f9b82ad0dac88a7ceaa28a9cf3154125a18`. It keeps native FLUX.3 Klein support (BFL's fixed
+Klein workflows need v0.41.3 or newer) and Qwen Image 2.1 support; the build checks for both
+model implementations. Torch and SageAttention pins are unchanged.
 
-Release this base before merging the dependent Qwen-template Klein 3 PR:
+Release this base before merging the dependent template PRs:
 
 1. Merge the runtime PR and create the next `vN` release tag through the existing release process.
 2. Wait for CircleCI to publish both immutable base images:
-   `hearmeman/comfyui-base:cu128-comfy0.41.0-98cc0bf8-torch2.11.0` and
-   `hearmeman/comfyui-base:cu130-comfy0.41.0-98cc0bf8-torch2.11.0`.
-3. Merge the Qwen-template PR that updates its Dockerfile and `pins.json` to the new cu130 base,
-   then release a new Qwen image. Existing pods keep their image's approved core until redeployed.
+   `hearmeman/comfyui-base:cu128-comfy0.42.1-63be2f9b-torch2.11.0` and
+   `hearmeman/comfyui-base:cu130-comfy0.42.1-63be2f9b-torch2.11.0`.
+3. Merge the template PRs (qwen, ltx2, minimax, wan) that update their Dockerfile and `pins.json`
+   to the new cu130 base, then release a new image per template. Existing pods keep their
+   image's approved core until redeployed.
 
-Moving `stable` alone does not upgrade an image's baked ComfyUI checkout. Other template images
-can adopt the new base separately; their current immutable base tags remain available for rollback.
+Moving `stable` alone does not upgrade an image's baked ComfyUI checkout. Previous immutable base
+tags (`comfy0.41.0-98cc0bf8`, `comfy0.36.0-3dd559d8`) remain available for rollback.
 
 ## License
 

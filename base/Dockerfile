@@ -18,7 +18,7 @@
 # is COPYed in), so always build with `-f base/Dockerfile` from the repo root.
 #
 # Tag grammar (plan.md 5c): hearmeman/comfyui-base:<cuNNN>-comfy<ref>-torch<ver>
-# e.g. cu130-comfy0.41.0-98cc0bf8-torch2.11.0. A torch or ComfyUI bump means a new tag;
+# e.g. cu130-comfy0.42.1-63be2f9b-torch2.11.0. A torch or ComfyUI bump means a new tag;
 # old tags are immutable rollbacks.
 #
 # A CUDA_VARIANT / CUDA_BASE_IMAGE mismatch is caught by the sage assertion
@@ -34,10 +34,11 @@ ARG CUDA_VARIANT
 # ComfyUI pin. Prefer an immutable 40-character commit SHA; tags also resolve.
 # The base tag carries a readable label, and COMFYUI_VERSION=approved restores to it
 # at boot via /comfyui-approved-ref (plan.md 5b).
-# Latest stable release v0.41.0 (2026-10-17), resolved to an immutable SHA.
-# Includes native FLUX.3 Klein support and retains Qwen Image 2.1 support.
-ARG COMFYUI_REF=98cc0bf84b7cb1383654c5b402e7612d875d6d22
-ARG COMFYUI_IMAGE_REF=0.41.0-98cc0bf8
+# Latest stable release v0.42.1 (2026-10-19), resolved to an immutable SHA.
+# Keeps native FLUX.3 Klein (BFL's fixed Klein workflows need >= v0.41.3) and
+# Qwen Image 2.1 support; the file checks below assert both.
+ARG COMFYUI_REF=63be2f9b82ad0dac88a7ceaa28a9cf3154125a18
+ARG COMFYUI_IMAGE_REF=0.42.1-63be2f9b
 
 # Consolidated environment variables (comfyui-wan/Dockerfile:22-26, byte-similar
 # in all four templates).
@@ -142,7 +143,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # kept ONLY for consistency with every existing image's custom_nodes layout.
 # It does NOT control load order, despite what the template Dockerfiles claim:
 # ComfyUI iterates custom_nodes with a bare os.listdir() and no sorted()
-# (nodes.py in the approved v0.36.0 tree), so load order is filesystem order,
+# (nodes.py, re-checked in the v0.42.1 tree), so load order is filesystem order,
 # effectively arbitrary on overlayfs (plan.md 5c, load-order note).
 RUN --mount=type=cache,target=/root/.cache/pip \
     git clone --depth=1 https://github.com/ltdrdata/ComfyUI-Manager.git \

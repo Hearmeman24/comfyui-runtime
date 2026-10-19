@@ -1,0 +1,55 @@
+# Opens the comfyui-runtime bump PR when ComfyUI ships a newer stable release.
+# Daily, plus manual. It only edits versions.json + base/Dockerfile ARG defaults
+# (tools/versions.py keeps them coherent) and opens a PR; CircleCI's
+# test_build_base then builds the base on that PR without pushing.
+# Never merges, never tags. Requires the repo setting
+# "Allow GitHub Actions to create and approve pull requests".
+name: ComfyUI release watch
+on:
+  schedule:
+    - cron: "17 5 * * *" # 08:17 Israel (UTC+3)
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: comfyui-release-watch
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check upstream and apply
+        id: watch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/comfyui_release_watch.py --apply
+      - name: Open bump PR
+        if: steps.watch.outputs.release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ steps.watch.outputs.release }}
+          SHA: ${{ steps.watch.outputs.sha }}
+          LABEL: ${{ steps.watch.outputs.label }}
+          PREVIOUS: ${{ steps.watch.outputs.previous }}
+        run: |
+          BRANCH="auto/comfyui-${LABEL}"
+          if gh pr list --head "$BRANCH" --state open --json number --jq 'length' | grep -qv '^0$'; then
+            echo "PR for $BRANCH already open"; exit 0
+          fi
+          git config user.name HearmemanAI
+          git config user.email 103748831+Hearmeman24@users.noreply.github.com
+          git switch -C "$BRANCH"
+          git commit -am "Upgrade approved ComfyUI base to ${RELEASE}"
+          git push --force -u origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "Upgrade approved ComfyUI base to ${RELEASE}" \
+            --body "Automated by the ComfyUI release watch.
+
+          - ComfyUI ${PREVIOUS} -> ${RELEASE} (\`${SHA}\`), from versions.json.
+          - Images after a vN tag: \`cu128-comfy${LABEL}-torch*\`, \`cu130-comfy${LABEL}-torch*\`.
+          - Review https://github.com/comfyanonymous/ComfyUI/compare/${PREVIOUS}...${RELEASE} and the CircleCI test_build_base result.
+
+          After merge + vN tag, CircleCI builds both variants and fans out template PRs (held templates are skipped)."

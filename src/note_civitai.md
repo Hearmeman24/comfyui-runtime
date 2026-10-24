@@ -17,14 +17,22 @@ Then every time you deploy:
 1. Click Edit Template before you deploy, not after.
 2. Expand the environment variables tab.
 3. Paste your token into the civitai_token variable.
-4. Add the model IDs you want to download: LoRAs in CIVITAI_LORAS,
+4. Add the **model version IDs** you want to download: LoRAs in CIVITAI_LORAS,
    checkpoints in CIVITAI_CHECKPOINTS.
 
-The model ID is the second part of the AIR on the model page. For more
-than one, separate them with commas:
+### Which number to paste
+
+On the CivitAI model page, select the version you want. Copy the number after
+`modelVersionId=` in that version's URL. A direct download URL uses the same
+version ID after `/api/download/models/`.
+
+- Use the **version ID** (modelVersionId), not the model ID after `/models/`.
+- Do **not** paste a bare `fileId` - CivitAI cannot look those up alone.
+- Full CivitAI URLs and AIR strings also work if you prefer them.
+- For more than one file, separate IDs with commas:
 
 ```
-1081768,351306
+2977820,87153
 ```
 
 Save and deploy. They download on their own. Your pod is already

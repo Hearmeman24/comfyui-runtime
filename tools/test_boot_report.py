@@ -372,7 +372,9 @@ def test_three_notes_written_as_markdownnote_workflows():
         ok("CIVITAI_LORAS" in adding and "CIVITAI_CHECKPOINTS" in adding,
            adding)
         ok("civitai_token" in adding, adding)
-        ok("1081768,351306" in adding, adding)
+        ok("2977820,87153" in adding, adding)
+        ok("modelVersionId" in adding, adding)
+        ok("fileId" in adding, adding)
         ok("/workspace/ComfyUI/models/loras" in adding, adding)
 
         # Troubleshooting: the live report verbatim, the missing-model steps

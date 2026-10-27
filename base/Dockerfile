@@ -34,11 +34,11 @@ ARG CUDA_VARIANT
 # ComfyUI pin. Prefer an immutable 40-character commit SHA; tags also resolve.
 # The base tag carries a readable label, and COMFYUI_VERSION=approved restores to it
 # at boot via /comfyui-approved-ref (plan.md 5b).
-# Latest stable release v0.42.1 (2026-10-19), resolved to an immutable SHA.
+# Latest stable release v0.43.0, resolved to an immutable SHA (versions.json).
 # Keeps native FLUX.3 Klein (BFL's fixed Klein workflows need >= v0.41.3) and
 # Qwen Image 2.1 support; the file checks below assert both.
-ARG COMFYUI_REF=63be2f9b82ad0dac88a7ceaa28a9cf3154125a18
-ARG COMFYUI_IMAGE_REF=0.42.1-63be2f9b
+ARG COMFYUI_REF=426f5eea52a7ece1dd599fff4cb6cd1f352ddd24
+ARG COMFYUI_IMAGE_REF=0.43.0-426f5eea
 
 # Consolidated environment variables (comfyui-wan/Dockerfile:22-26, byte-similar
 # in all four templates).

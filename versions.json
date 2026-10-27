@@ -1,7 +1,7 @@
 {
   "comfyui": {
-    "release": "v0.42.1",
-    "sha": "63be2f9b82ad0dac88a7ceaa28a9cf3154125a18"
+    "release": "v0.43.0",
+    "sha": "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24"
   },
   "torch": "2.11.0",
   "cuda_variants": {
@@ -10,9 +10,21 @@
   },
   "template_variant": "cu130",
   "templates": [
-    {"repo": "Hearmeman24/comfyui-qwen-template", "branch": "master"},
-    {"repo": "Hearmeman24/comfyui-ltx2", "branch": "main"},
-    {"repo": "Hearmeman24/comfyui-minimax", "branch": "master"},
-    {"repo": "Hearmeman24/comfyui-wan", "branch": "master"}
+    {
+      "repo": "Hearmeman24/comfyui-qwen-template",
+      "branch": "master"
+    },
+    {
+      "repo": "Hearmeman24/comfyui-ltx2",
+      "branch": "main"
+    },
+    {
+      "repo": "Hearmeman24/comfyui-minimax",
+      "branch": "master"
+    },
+    {
+      "repo": "Hearmeman24/comfyui-wan",
+      "branch": "master"
+    }
   ]
 }

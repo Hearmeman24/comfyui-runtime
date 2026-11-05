@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -60,6 +61,25 @@ class Versions(unittest.TestCase):
         (self.tmp / "versions.json").write_text(json.dumps(raw))
         data = versions.load(self.tmp / "versions.json")
         self.assertTrue(any("torch/cu130.txt" in p for p in versions.check(data, self.tmp)))
+
+    def test_successive_release_syncs_update_comment(self) -> None:
+        dockerfile = self.tmp / "base" / "Dockerfile"
+        original = dockerfile.read_text()
+        old_comment = "# Latest stable release v0.44.0 (2026-11-04), resolved to an immutable SHA."
+        generated_comment = "# Latest stable release v0.44.0, resolved to an immutable SHA (versions.json)."
+        for comment in (old_comment, generated_comment):
+            with self.subTest(initial_comment=comment):
+                dockerfile.write_text(re.sub(r"(?m)^# Latest stable release .*\.$", comment, original))
+                path = self.tmp / "versions.json"
+                for release, sha in (("v9.9.9", "a" * 40), ("v9.9.10", "b" * 40)):
+                    data = versions.set_release(release, sha, path)
+                    self.assertTrue(versions.sync(data, self.tmp))
+                    self.assertIn(
+                        f"# Latest stable release {release}, resolved to an immutable SHA (versions.json).",
+                        dockerfile.read_text(),
+                    )
+                    self.assertEqual(versions.check(data, self.tmp), [])
+                    self.assertFalse(versions.sync(data, self.tmp))
 
     def test_rejects_short_sha(self) -> None:
         path = self.tmp / "versions.json"

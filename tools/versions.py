@@ -104,7 +104,7 @@ def sync(data: dict, root: Path = ROOT) -> bool:
     text = path.read_text()
     new = re.sub(r"(?m)^ARG COMFYUI_REF=\S+$", f"ARG COMFYUI_REF={data['comfyui']['sha']}", text)
     new = re.sub(r"(?m)^ARG COMFYUI_IMAGE_REF=\S+$", f"ARG COMFYUI_IMAGE_REF={label(data)}", new)
-    new = re.sub(r"(?m)^# Latest stable release v\S+ \([^)]*\), resolved to an immutable SHA\.$",
+    new = re.sub(r"(?m)^# Latest stable release v\S+(?: \([^)]*\))?, resolved to an immutable SHA(?: \(versions\.json\))?\.$",
                  f"# Latest stable release {data['comfyui']['release']}, resolved to an immutable SHA (versions.json).", new)
     if new != text:
         path.write_text(new)

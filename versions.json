@@ -1,7 +1,7 @@
 {
   "comfyui": {
-    "release": "v0.42.1",
-    "sha": "63be2f9b82ad0dac88a7ceaa28a9cf3154125a18"
+    "release": "v0.44.0",
+    "sha": "2c75dc1b379a59e0880619d029607af5169a62ef"
   },
   "torch": "2.11.0",
   "cuda_variants": {

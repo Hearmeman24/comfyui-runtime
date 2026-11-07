@@ -10,9 +10,21 @@
   },
   "template_variant": "cu130",
   "templates": [
-    {"repo": "Hearmeman24/comfyui-qwen-template", "branch": "master"},
-    {"repo": "Hearmeman24/comfyui-ltx2", "branch": "main"},
-    {"repo": "Hearmeman24/comfyui-minimax", "branch": "master"},
-    {"repo": "Hearmeman24/comfyui-wan", "branch": "master"}
+    {
+      "repo": "Hearmeman24/comfyui-qwen-template",
+      "branch": "master"
+    },
+    {
+      "repo": "Hearmeman24/comfyui-ltx2",
+      "branch": "main"
+    },
+    {
+      "repo": "Hearmeman24/comfyui-minimax",
+      "branch": "master"
+    },
+    {
+      "repo": "Hearmeman24/comfyui-wan",
+      "branch": "master"
+    }
   ]
 }

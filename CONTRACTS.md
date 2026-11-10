@@ -197,7 +197,7 @@ wan `:77-85`) or its explicit `workflows` list (qwen's shape,
 `comfyui-qwen-image/src/provision_models.py:92-102`). Then:
 
 1. **Rewrite pass** (only when `swap_groups` exist): parse each workflow as JSON and apply the swap
-   map (see §5a) to every node's `widgets_values` in `nodes` AND in
+   map (see §5a) to every node's `widgets_values` (and `widgets_values_named`, when present) in `nodes` AND in
    `definitions.subgraphs[].nodes`, and to every `properties.models[]` entry (both `name` and `url`,
    url from the registry) (`comfyui-minimax/src/workflow_provisioner.py:141-160`). Write with
    `json.dumps(doc, indent=2, ensure_ascii=False)`. Without swap groups, copy bytes verbatim

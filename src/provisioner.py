@@ -192,7 +192,8 @@ def rewrite_doc(doc: dict, swaps: dict, registry: dict) -> None:
     Ported from comfyui-minimax/src/workflow_provisioner.py:141-160. Both
     the top-level nodes and definitions.subgraphs[].nodes are walked: a
     subgraph INSTANCE node carries its own promoted widget values separate
-    from the definition's inner loaders. Only exact filename widget values
+    from the definition's inner loaders. Both widgets_values and
+    widgets_values_named are swapped. Only exact filename widget values
     are swapped, so note prose survives.
     """
     groups = [doc.get("nodes", [])] + [
@@ -206,6 +207,15 @@ def rewrite_doc(doc: dict, swaps: dict, registry: dict) -> None:
                 n["widgets_values"] = [
                     swaps.get(v, v) if isinstance(v, str) else v for v in wv
                 ]
+            # Newer frontends also save widgets_values_named, the same
+            # values keyed by widget name. Swap it the same way, or a workflow
+            # read by name keeps pointing at the variant we did not download.
+            wn = n.get("widgets_values_named")
+            if isinstance(wn, dict):
+                n["widgets_values_named"] = {
+                    k: swaps.get(v, v) if isinstance(v, str) else v
+                    for k, v in wn.items()
+                }
             # The frontend's "Missing Models" dialog reads properties.models,
             # not the loader widget. Leave it on the variant we didn't
             # download and the customer is told a file is missing and handed
@@ -655,7 +665,10 @@ def selftest() -> None:
             {"id": 1, "widgets_values": ["a_int8.safetensors", 3],
              "properties": {"models": [
                  {"name": "a_int8.safetensors", "url": "old"}]}},
-            {"id": 2, "type": "sg", "widgets_values": ["a_int8.safetensors"]},
+            {"id": 2, "type": "sg", "widgets_values": ["a_int8.safetensors"],
+             "widgets_values_named": {"unet_name": "a_int8.safetensors",
+                                      "note": "uses a_int8.safetensors",
+                                      "steps": 8}},
         ],
         "definitions": {"subgraphs": [{"id": "sg", "nodes": [
             {"id": 10, "widgets_values": ["a_int8.safetensors"],
@@ -669,6 +682,9 @@ def selftest() -> None:
         "name": "a_fp8.safetensors",
         "url": "https://h/a_fp8.safetensors"}
     assert doc["nodes"][1]["widgets_values"] == ["a_fp8.safetensors"]
+    assert doc["nodes"][1]["widgets_values_named"] == {
+        "unet_name": "a_fp8.safetensors",
+        "note": "uses a_int8.safetensors", "steps": 8}
     inner = doc["definitions"]["subgraphs"][0]["nodes"][0]
     assert inner["widgets_values"] == ["a_fp8.safetensors"]
     assert inner["properties"]["models"][0]["url"] == (

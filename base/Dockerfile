@@ -34,11 +34,12 @@ ARG CUDA_VARIANT
 # ComfyUI pin. Prefer an immutable 40-character commit SHA; tags also resolve.
 # The base tag carries a readable label, and COMFYUI_VERSION=approved restores to it
 # at boot via /comfyui-approved-ref (plan.md 5b).
-# Latest stable release v0.44.0, resolved to an immutable SHA (versions.json).
+# Latest stable release v0.45.0, resolved to an immutable SHA (versions.json).
 # Keeps native FLUX.3 Klein (BFL's fixed Klein workflows need >= v0.41.3) and
-# Qwen Image 2.1 support; the file checks below assert both.
-ARG COMFYUI_REF=2c75dc1b379a59e0880619d029607af5169a62ef
-ARG COMFYUI_IMAGE_REF=0.44.0-2c75dc1b
+# Qwen Image 2.1 support, and adds MiniMax H3 Image (MiniMaxH3ImageConditioning,
+# first shipped in v0.45.0); the file checks below assert all three.
+ARG COMFYUI_REF=989d93d0d968e704c589ce0146bb18c77f6b50cc
+ARG COMFYUI_IMAGE_REF=0.45.0-989d93d0
 
 # Consolidated environment variables (comfyui-wan/Dockerfile:22-26, byte-similar
 # in all four templates).
@@ -134,6 +135,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && test -f /ComfyUI/comfy/ldm/qwen_image21/model.py \
     && test -f /ComfyUI/comfy/text_encoders/qwen_image21.py \
     && test -f /ComfyUI/comfy/ldm/flux3/model.py \
+    && test -f /ComfyUI/comfy/ldm/minimax/sampling.py \
+    && grep -q 'node_id="MiniMaxH3ImageConditioning"' /ComfyUI/comfy_extras/nodes_minimax_h3.py \
     && git -C /ComfyUI config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' \
     && git -C /ComfyUI config --add remote.origin.fetch '+refs/tags/*:refs/tags/*' \
     && git -C /ComfyUI rev-parse HEAD > /comfyui-approved-ref \
